@@ -1,4 +1,4 @@
-name: Test and Publish
+name: Publish to PyPI
 
 on:
   workflow_dispatch:
@@ -11,62 +11,14 @@ on:
         options:
           - pypi
           - testpypi
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
 
 permissions:
   contents: read
   id-token: write
 
 jobs:
-  test:
-    name: Test on ${{ matrix.os-name }} (Python ${{ matrix.python-version }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows-2022
-            os-name: "Windows 10 (Server 2022)"
-            python-version: "3.10"
-          - os: windows-2022
-            os-name: "Windows 10 (Server 2022)"
-            python-version: "3.11"
-          - os: windows-2022
-            os-name: "Windows 10 (Server 2022)"
-            python-version: "3.12"
-          - os: windows-2025
-            os-name: "Windows 11 (Server 2025)"
-            python-version: "3.10"
-          - os: windows-2025
-            os-name: "Windows 11 (Server 2025)"
-            python-version: "3.11"
-          - os: windows-2025
-            os-name: "Windows 11 (Server 2025)"
-            python-version: "3.12"
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
-          version: "latest"
-
-      - name: Set up Python ${{ matrix.python-version }}
-        run: uv python install ${{ matrix.python-version }}
-
-      - name: Run automated test suite (100 tests)
-        run: uv run --extra dev --python ${{ matrix.python-version }} pytest -v
-
-  publish:
+  build-and-publish:
     name: Build & Publish to PyPI
-    needs: test
-    if: github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
 
     steps:
@@ -81,6 +33,9 @@ jobs:
 
       - name: Set up Python 3.10
         run: uv python install 3.10
+
+      - name: Verify test suite before publishing
+        run: uv run --extra dev --python 3.10 pytest -v
 
       - name: Build wheel and source distribution
         run: uv build

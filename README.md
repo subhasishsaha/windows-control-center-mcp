@@ -32,7 +32,8 @@ Windows Control Center provides tools for interacting with Windows systems:
 windows-mcp/
 ├── .github/
 │   └── workflows/
-│       └── publish.yml             # Test across Windows 10/11, build wheel & publish to PyPI
+│       ├── test.yml                # CI test matrix across Windows 10/11 & Python 3.10-3.12
+│       └── publish.yml             # Manual workflow: build wheel & publish to PyPI
 ├── src/
 │   └── windows-control-center-mcp/ # Core server package
 │       ├── server.py               # FastMCP stdio server entrypoint & schemas
