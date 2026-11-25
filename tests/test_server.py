@@ -1,18 +1,17 @@
-"""Unit tests for server initialization, tool registration, and network defenses."""
+"""Unit tests for Windows Control Center MCP Server (Strictly Stdio Transport)."""
 
 import asyncio
-import os
+import io
+import logging
+import sys
 import unittest
-from starlette.applications import Starlette
-from starlette.middleware import Middleware
-from starlette.responses import JSONResponse
-from starlette.routing import Route
-from starlette.testclient import TestClient
-from server import LocalCorsMiddleware, _is_loopback, _is_safe_host, _is_safe_origin, mcp
+from unittest.mock import patch
+from fastmcp import Client
+from server import logger, mcp, parse_arguments
 
 
 class TestServerConfiguration(unittest.TestCase):
-    """Test suite for server tool registration and network defenses."""
+    """Test suite for stdio server tool registration, metadata, and argument parsing."""
 
     def test_registered_tools(self):
         """Verify that all 22 anticipated tools are registered on the FastMCP instance."""
@@ -61,178 +60,116 @@ class TestServerConfiguration(unittest.TestCase):
         prompt_names = {p.name for p in prompts}
         self.assertIn("system_health_check", prompt_names)
 
-    def test_loopback_detection(self):
-        """Test loopback IP defense."""
-        # Valid loopbacks
-        for h in ("127.0.0.1", "localhost", "::1", "127.0.0.2", "127.1.2.3"):
-            self.assertTrue(_is_loopback(h), f"Failed to identify loopback: {h}")
+    def test_mcp_metadata_and_tool_annotations(self):
+        """Verify FastMCP server version, resource mime types, and tool annotations."""
+        self.assertEqual(mcp.version, "1.0.0")
 
-        # Invalid remote interfaces
-        for h in ("0.0.0.0", "192.168.1.10", "10.0.0.1", "attacker.com", "8.8.8.8"):
-            self.assertFalse(_is_loopback(h), f"Falsely identified as loopback: {h}")
+        resources = asyncio.run(mcp.list_resources())
+        for r in resources:
+            self.assertEqual(r.mime_type, "application/json")
 
-        # Malicious domains attempting DNS rebinding via 127. prefix
-        for h in (
-            "127.0.0.1.attacker.com",
-            "127.evil.com",
-            "127.fake.net",
-            "127.0.0.1.nip.io",
-            "127.attacker.com",
-            "127a.com",
-        ):
-            self.assertFalse(_is_loopback(h), f"Falsely identified DNS rebinding domain as loopback: {h}")
-
-    def test_safe_origin_detection(self):
-        """Test CORS Origin defense against Drive-By Browser and DNS-Rebinding attacks."""
-        # Safe origins
-        self.assertTrue(_is_safe_origin(""))  # CLI / AGY CLI / curl
-        self.assertTrue(_is_safe_origin("http://localhost"))
-        self.assertTrue(_is_safe_origin("http://localhost:3000"))
-        self.assertTrue(_is_safe_origin("http://127.0.0.1"))
-        self.assertTrue(_is_safe_origin("http://127.0.0.1:8000"))
-        self.assertTrue(_is_safe_origin("http://[::1]:8000"))
-        self.assertTrue(_is_safe_origin("https://localhost:8000"))
-        self.assertTrue(_is_safe_origin("vscode-webview://12345"))
-        self.assertTrue(_is_safe_origin("cursor-webview://12345"))
-
-        # Untrusted public web origins & null origin (sandboxed iframes)
-        self.assertFalse(_is_safe_origin("null"))  # Block null origin from browser sandboxed iframes
-        self.assertFalse(_is_safe_origin("https://evil.com"))
-        self.assertFalse(_is_safe_origin("http://attacker.org"))
-        self.assertFalse(_is_safe_origin("https://phishing.xyz"))
-        self.assertFalse(_is_safe_origin("http://192.168.1.50:8000"))
-
-    def test_safe_host_dns_rebinding_defense(self):
-        """Test Host header validation to prevent DNS-Rebinding attacks."""
-        # Safe local hosts
-        self.assertTrue(_is_safe_host(""))
-        self.assertTrue(_is_safe_host("127.0.0.1"))
-        self.assertTrue(_is_safe_host("127.0.0.1:8000"))
-        self.assertTrue(_is_safe_host("localhost"))
-        self.assertTrue(_is_safe_host("localhost:8000"))
-        self.assertTrue(_is_safe_host("::1"))
-        self.assertTrue(_is_safe_host("[::1]"))
-        self.assertTrue(_is_safe_host("[::1]:8000"))
-        self.assertTrue(_is_safe_host("testserver"))
-
-        # Dangerous / rebind hosts
-        self.assertFalse(_is_safe_host("evil.com"))
-        self.assertFalse(_is_safe_host("evil.com:8000"))
-        self.assertFalse(_is_safe_host("attacker.internal"))
-        self.assertFalse(_is_safe_host("192.168.1.100:8000"))
-        self.assertFalse(_is_safe_host("127.0.0.1.attacker.com"))
-        self.assertFalse(_is_safe_host("127.0.0.1.attacker.com:8000"))
-        self.assertFalse(_is_safe_host("127.evil.com"))
-        self.assertFalse(_is_safe_host("127.evil.com:8000"))
-        self.assertFalse(_is_safe_host("127.attacker.com"))
-        self.assertFalse(_is_safe_host("127.attacker.com:8000"))
-        self.assertFalse(_is_safe_host("127-attacker.com"))
-        self.assertFalse(_is_safe_host("127a.com"))
-
-        # Malformed port & suffix DNS rebinding evasions
-        self.assertFalse(_is_safe_host("[::1].evil.com"))
-        self.assertFalse(_is_safe_host("[::1]:8000.evil.com"))
-        self.assertFalse(_is_safe_host("127.0.0.1:8000.evil.com"))
-        self.assertFalse(_is_safe_host("localhost:8000.evil.com"))
-        self.assertFalse(_is_safe_host("127.0.0.1:abc"))
-        self.assertFalse(_is_safe_host("[::1]:abc"))
-        self.assertFalse(_is_safe_host("[::1]:70000"))
-        self.assertFalse(_is_safe_host("127.0.0.1:0"))
-
-    def test_auth_token_middleware(self):
-        """Test optional MCP_AUTH_TOKEN Bearer authentication in LocalCorsMiddleware."""
-        async def mock_endpoint(request):
-            return JSONResponse({"status": "ok"})
-
-        app = Starlette(
-            routes=[Route("/mcp", mock_endpoint, methods=["GET", "POST"])],
-            middleware=[Middleware(LocalCorsMiddleware, allowed_host="127.0.0.1")],
+        tools = {t.name: t for t in asyncio.run(mcp.list_tools())}
+        read_only_tools = (
+            "get_security_status",
+            "list_processes",
+            "read_file",
+            "list_directory",
+            "search_files",
+            "get_file_info",
+            "get_system_info",
+            "get_network_info",
+            "get_environment",
+            "get_clipboard",
         )
-        client = TestClient(app, base_url="http://127.0.0.1:8000")
+        for name in read_only_tools:
+            ann = tools[name].annotations
+            self.assertIsNotNone(ann, f"Missing ToolAnnotations on {name}")
+            self.assertTrue(ann.read_only_hint, f"Expected read_only_hint=True on {name}")
+            self.assertFalse(ann.destructive_hint, f"Expected destructive_hint=False on {name}")
 
-        # 1. Without MCP_AUTH_TOKEN set, requests succeed
-        old_token = os.environ.pop("MCP_AUTH_TOKEN", None)
+        for name in ("execute_powershell", "execute_cmd", "execute_python", "delete_file_or_dir", "kill_process"):
+            ann = tools[name].annotations
+            self.assertIsNotNone(ann, f"Missing ToolAnnotations on {name}")
+            self.assertFalse(ann.read_only_hint, f"Expected read_only_hint=False on {name}")
+            self.assertTrue(ann.destructive_hint, f"Expected destructive_hint=True on {name}")
+
+    def test_parse_arguments_default_stdio(self):
+        """Verify that default CLI arguments specify strictly stdio transport."""
+        with patch.object(sys, "argv", ["server.py"]):
+            args = parse_arguments()
+            self.assertEqual(args.transport, "stdio")
+            self.assertEqual(args.log_level, "INFO")
+
+    def test_parse_arguments_custom_log_level(self):
+        """Verify custom log level parsing."""
+        with patch.object(sys, "argv", ["server.py", "--log-level", "DEBUG"]):
+            args = parse_arguments()
+            self.assertEqual(args.transport, "stdio")
+            self.assertEqual(args.log_level, "DEBUG")
+
+    def test_parse_arguments_rejects_http_transport(self):
+        """Verify that attempting to pass HTTP or remote transports is rejected."""
+        with patch.object(sys, "argv", ["server.py", "--transport", "http"]):
+            with self.assertRaises(SystemExit):
+                with patch("sys.stderr", new_callable=io.StringIO):
+                    parse_arguments()
+
+    def test_stdio_cleanliness_stdout_untouched_by_logging(self):
+        """Ensure logging is routed exclusively to stderr so stdout remains clean for MCP JSON-RPC."""
+        stderr_capture = io.StringIO()
+        stdout_capture = io.StringIO()
+
+        test_handler = logging.StreamHandler(stderr_capture)
+        test_handler.setLevel(logging.INFO)
+        test_handler.setFormatter(logging.Formatter("%(message)s"))
+        logger.setLevel(logging.INFO)
+        logger.addHandler(test_handler)
+
         try:
-            res = client.get("/mcp")
-            self.assertEqual(res.status_code, 200)
-
-            # 2. With MCP_AUTH_TOKEN set
-            os.environ["MCP_AUTH_TOKEN"] = "super-secret-mcp-key"
-
-            # Request without token is 401 Unauthorized
-            res_no_auth = client.get("/mcp")
-            self.assertEqual(res_no_auth.status_code, 401)
-            self.assertIn("Unauthorized", res_no_auth.text)
-
-            # Request with wrong token is 401
-            res_wrong = client.get("/mcp", headers={"Authorization": "Bearer wrong-key"})
-            self.assertEqual(res_wrong.status_code, 401)
-
-            # Request with correct Bearer token succeeds
-            res_ok = client.get("/mcp", headers={"Authorization": "Bearer super-secret-mcp-key"})
-            self.assertEqual(res_ok.status_code, 200)
-            self.assertEqual(res_ok.json(), {"status": "ok"})
-
-            # OPTIONS preflight request succeeds without auth
-            res_options = client.options("/mcp")
-            self.assertEqual(res_options.status_code, 200)
-
-            # Case-insensitive auth scheme per RFC 7235
-            res_lower_scheme = client.get("/mcp", headers={"Authorization": "bearer super-secret-mcp-key"})
-            self.assertEqual(res_lower_scheme.status_code, 200)
-
-            res_upper_scheme = client.get("/mcp", headers={"Authorization": "BEARER super-secret-mcp-key"})
-            self.assertEqual(res_upper_scheme.status_code, 200)
-
-            res_lower_header = client.get("/mcp", headers={"authorization": "Bearer super-secret-mcp-key"})
-            self.assertEqual(res_lower_header.status_code, 200)
+            with patch("sys.stdout", stdout_capture):
+                logger.info("TEST_STDIO_LOG_MESSAGE")
+                test_handler.flush()
+                # stdout MUST be completely empty - zero log leakage
+                self.assertEqual(stdout_capture.getvalue(), "")
+                # stderr should contain our message
+                self.assertIn("TEST_STDIO_LOG_MESSAGE", stderr_capture.getvalue())
         finally:
-            if old_token is not None:
-                os.environ["MCP_AUTH_TOKEN"] = old_token
-            else:
-                os.environ.pop("MCP_AUTH_TOKEN", None)
+            logger.removeHandler(test_handler)
 
-    def test_local_cors_middleware_blocks_dns_rebinding_hosts(self):
-        """Ensure LocalCorsMiddleware blocks requests with DNS-rebinding Host headers (HTTP 403)."""
-        async def mock_endpoint(request):
-            return JSONResponse({"status": "ok"})
+    def test_mcp_client_tool_invocation(self):
+        """Test invoking an MCP tool through FastMCP Client in-memory harness."""
+        async def run_test():
+            async with Client(mcp) as client:
+                res = await client.call_tool("get_security_status", {})
+                self.assertTrue(res)
+                data = res.data if hasattr(res, "data") else res
+                self.assertIsNotNone(data)
 
-        app = Starlette(
-            routes=[Route("/mcp", mock_endpoint, methods=["GET", "POST"])],
-            middleware=[Middleware(LocalCorsMiddleware, allowed_host="127.0.0.1")],
-        )
-        client = TestClient(app, base_url="http://127.0.0.1:8000")
+        asyncio.run(run_test())
 
-        # DNS rebinding hosts must receive 403 Forbidden
-        rebinding_hosts = [
-            "127.0.0.1.attacker.com",
-            "127.0.0.1.attacker.com:8000",
-            "127.evil.com",
-            "127.evil.com:8000",
-            "127.attacker.com:8000",
-            "evil.com",
-            "evil.com:8000",
-            "[::1].evil.com",
-            "127.0.0.1:8000.evil.com",
-            "localhost:8000.evil.com",
-            "[::1]:8000.evil.com",
-        ]
-        for bad_host in rebinding_hosts:
-            res = client.get("/mcp", headers={"host": bad_host})
-            self.assertEqual(res.status_code, 403, f"Host '{bad_host}' was not blocked (got {res.status_code})")
-            self.assertIn("Host header validation failed", res.text)
+    def test_mcp_client_resource_read(self):
+        """Test reading resources through FastMCP Client in-memory harness."""
+        async def run_test():
+            async with Client(mcp) as client:
+                specs = await client.read_resource("system://specs")
+                self.assertTrue(len(specs) > 0)
+                self.assertEqual(specs[0].mime_type, "application/json")
 
-        # Legitimate loopback hosts must receive 200 OK
-        valid_hosts = [
-            "127.0.0.1",
-            "127.0.0.1:8000",
-            "localhost",
-            "localhost:8000",
-            "testserver",
-        ]
-        for good_host in valid_hosts:
-            res = client.get("/mcp", headers={"host": good_host})
-            self.assertEqual(res.status_code, 200, f"Valid host '{good_host}' was blocked (got {res.status_code})")
+                net = await client.read_resource("system://network")
+                self.assertTrue(len(net) > 0)
+                self.assertEqual(net[0].mime_type, "application/json")
+
+        asyncio.run(run_test())
+
+    def test_mcp_client_prompt_get(self):
+        """Test retrieving prompts through FastMCP Client in-memory harness."""
+        async def run_test():
+            async with Client(mcp) as client:
+                prompt = await client.get_prompt("system_health_check", {})
+                self.assertTrue(prompt)
+                self.assertTrue(len(prompt.messages) > 0)
+
+        asyncio.run(run_test())
 
 
 if __name__ == "__main__":

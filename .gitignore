@@ -28,9 +28,10 @@ htmlcov/
 *.log
 security_audit.log
 
-# Temporary screenshots
+# Temporary screenshots & elevation scratch
 screenshots/
 *.png
+mcp_elev_*/
 
 # Secrets & Environment
 .env

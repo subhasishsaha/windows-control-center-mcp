@@ -31,6 +31,73 @@ def _decode_output(raw_bytes: bytes) -> str:
     return raw_bytes.decode("utf-8", errors="replace")
 
 
+def _execution_error_result(
+    stderr: str,
+    *,
+    blocked_by_guardrail: bool = False,
+    sandboxed: Optional[bool] = None,
+) -> Dict[str, Any]:
+    """Build a uniform error payload for command and code execution failures."""
+    result: Dict[str, Any] = {
+        "stdout": "",
+        "stderr": stderr,
+        "return_code": -1,
+        "timed_out": False,
+        "execution_time_seconds": 0.0,
+    }
+    if blocked_by_guardrail:
+        result["blocked_by_guardrail"] = True
+    if sandboxed is not None:
+        result["sandboxed"] = sandboxed
+    return result
+
+
+def _run_sandboxed_command(
+    cmd: List[str],
+    *,
+    working_dir: Optional[str] = None,
+    timeout: int = 120,
+    timeout_label: str = "Command",
+) -> Dict[str, Any]:
+    """Validate working directory, enforce mandatory Job Object sandboxing, and execute cmd."""
+    cwd: Optional[str] = None
+    if working_dir is not None:
+        cwd = os.path.abspath(working_dir)
+        if not os.path.exists(cwd):
+            return _execution_error_result(f"Working directory does not exist: {cwd}")
+
+    # Strict enforcement: Job Object sandboxing is mandatory and non-bypassable
+    if not is_job_sandbox_supported():
+        return _execution_error_result(
+            "Execution blocked: Windows Job Object sandbox is mandatory and unavailable in this environment.",
+            blocked_by_guardrail=True,
+            sandboxed=False,
+        )
+
+    bounded_timeout = max(1, min(timeout, 3600))
+    start_time = time.perf_counter()
+    raw_stdout, raw_stderr, return_code, timed_out, metrics = run_in_job_sandbox(
+        cmd,
+        cwd=cwd,
+        timeout=bounded_timeout,
+    )
+    exec_time = round(time.perf_counter() - start_time, 2)
+    stderr_str = _decode_output(raw_stderr)
+    if timed_out and not stderr_str:
+        stderr_str = f"{timeout_label} timed out after {bounded_timeout} seconds."
+
+    return {
+        "stdout": _decode_output(raw_stdout),
+        "stderr": stderr_str,
+        "return_code": return_code,
+        "timed_out": timed_out,
+        "execution_time_seconds": exec_time,
+        "sandboxed": True,
+        "sandbox_backend": "windows_job_object",
+        "sandbox_metrics": metrics,
+    }
+
+
 def execute_powershell(
     command: str,
     working_dir: Optional[str] = None,
@@ -57,41 +124,13 @@ def execute_powershell(
     if elevate:
         return execute_elevated(command, timeout=timeout, working_dir=working_dir)
 
-    # Guardrail: Check command safety
-    is_safe, security_err = validate_command(command)
+    is_safe, security_err = validate_command(command, working_dir=working_dir)
     if not is_safe:
-        return {
-            "stdout": "",
-            "stderr": security_err or "Command blocked by security guardrails.",
-            "return_code": -1,
-            "timed_out": False,
-            "execution_time_seconds": 0.0,
-            "blocked_by_guardrail": True,
-        }
+        return _execution_error_result(
+            security_err or "Command blocked by security guardrails.",
+            blocked_by_guardrail=True,
+        )
 
-    cwd = os.path.abspath(working_dir) if working_dir else os.getcwd()
-    if not os.path.exists(cwd):
-        return {
-            "stdout": "",
-            "stderr": f"Working directory does not exist: {cwd}",
-            "return_code": -1,
-            "timed_out": False,
-            "execution_time_seconds": 0.0,
-        }
-
-    # Strict enforcement: Job Object sandboxing is mandatory and non-bypassable
-    if not is_job_sandbox_supported():
-        return {
-            "stdout": "",
-            "stderr": "Execution blocked: Windows Job Object sandbox is mandatory and unavailable in this environment.",
-            "return_code": -1,
-            "timed_out": False,
-            "execution_time_seconds": 0.0,
-            "blocked_by_guardrail": True,
-            "sandboxed": False,
-        }
-
-    # Use PowerShell with bypass policy and UTF-8 output encoding
     ps_cmd = [
         "powershell.exe",
         "-NoProfile",
@@ -101,27 +140,12 @@ def execute_powershell(
         "-Command",
         f"[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; {command}",
     ]
-
-    start_time = time.time()
-    raw_stdout, raw_stderr, return_code, timed_out, metrics = run_in_job_sandbox(
+    return _run_sandboxed_command(
         ps_cmd,
-        cwd=cwd,
+        working_dir=working_dir if working_dir is not None else os.getcwd(),
         timeout=timeout,
+        timeout_label="Command",
     )
-    exec_time = round(time.time() - start_time, 2)
-    stderr_str = _decode_output(raw_stderr)
-    if timed_out and not stderr_str:
-        stderr_str = f"Command timed out after {timeout} seconds."
-    return {
-        "stdout": _decode_output(raw_stdout),
-        "stderr": stderr_str,
-        "return_code": return_code,
-        "timed_out": timed_out,
-        "execution_time_seconds": exec_time,
-        "sandboxed": True,
-        "sandbox_backend": "windows_job_object",
-        "sandbox_metrics": metrics,
-    }
 
 
 def execute_cmd(
@@ -143,61 +167,19 @@ def execute_cmd(
         A dictionary with stdout, stderr, return_code, execution_time_seconds, timed_out status,
         and sandbox metrics.
     """
-    # Guardrail check
-    is_safe, security_err = validate_command(command)
+    is_safe, security_err = validate_command(command, working_dir=working_dir)
     if not is_safe:
-        return {
-            "stdout": "",
-            "stderr": security_err or "Command blocked by security guardrails.",
-            "return_code": -1,
-            "timed_out": False,
-            "execution_time_seconds": 0.0,
-            "blocked_by_guardrail": True,
-        }
+        return _execution_error_result(
+            security_err or "Command blocked by security guardrails.",
+            blocked_by_guardrail=True,
+        )
 
-    cwd = os.path.abspath(working_dir) if working_dir else os.getcwd()
-    if not os.path.exists(cwd):
-        return {
-            "stdout": "",
-            "stderr": f"Working directory does not exist: {cwd}",
-            "return_code": -1,
-            "timed_out": False,
-            "execution_time_seconds": 0.0,
-        }
-
-    # Strict enforcement: Job Object sandboxing is mandatory and non-bypassable
-    if not is_job_sandbox_supported():
-        return {
-            "stdout": "",
-            "stderr": "Execution blocked: Windows Job Object sandbox is mandatory and unavailable in this environment.",
-            "return_code": -1,
-            "timed_out": False,
-            "execution_time_seconds": 0.0,
-            "blocked_by_guardrail": True,
-            "sandboxed": False,
-        }
-
-    cmd = ["cmd.exe", "/c", command]
-    start_time = time.time()
-    raw_stdout, raw_stderr, return_code, timed_out, metrics = run_in_job_sandbox(
-        cmd,
-        cwd=cwd,
+    return _run_sandboxed_command(
+        ["cmd.exe", "/c", command],
+        working_dir=working_dir if working_dir is not None else os.getcwd(),
         timeout=timeout,
+        timeout_label="Command",
     )
-    exec_time = round(time.time() - start_time, 2)
-    stderr_str = _decode_output(raw_stderr)
-    if timed_out and not stderr_str:
-        stderr_str = f"Command timed out after {timeout} seconds."
-    return {
-        "stdout": _decode_output(raw_stdout),
-        "stderr": stderr_str,
-        "return_code": return_code,
-        "timed_out": timed_out,
-        "execution_time_seconds": exec_time,
-        "sandboxed": True,
-        "sandbox_backend": "windows_job_object",
-        "sandbox_metrics": metrics,
-    }
 
 
 def execute_python(
@@ -217,49 +199,19 @@ def execute_python(
         A dictionary with stdout, stderr, return_code, execution_time_seconds, timed_out status,
         and sandbox metrics.
     """
-    # Guardrail check
     is_safe, security_err = validate_python_code(code)
     if not is_safe:
-        return {
-            "stdout": "",
-            "stderr": security_err or "Python code blocked by security guardrails.",
-            "return_code": -1,
-            "timed_out": False,
-            "execution_time_seconds": 0.0,
-            "blocked_by_guardrail": True,
-        }
+        return _execution_error_result(
+            security_err or "Python code blocked by security guardrails.",
+            blocked_by_guardrail=True,
+        )
 
-    # Strict enforcement: Job Object sandboxing is mandatory and non-bypassable
-    if not is_job_sandbox_supported():
-        return {
-            "stdout": "",
-            "stderr": "Execution blocked: Windows Job Object sandbox is mandatory and unavailable in this environment.",
-            "return_code": -1,
-            "timed_out": False,
-            "execution_time_seconds": 0.0,
-            "blocked_by_guardrail": True,
-            "sandboxed": False,
-        }
-
-    start_time = time.time()
-    raw_stdout, raw_stderr, return_code, timed_out, metrics = run_in_job_sandbox(
+    return _run_sandboxed_command(
         [sys.executable, "-c", code],
+        working_dir=None,
         timeout=timeout,
+        timeout_label="Python execution",
     )
-    exec_time = round(time.time() - start_time, 2)
-    stderr_str = _decode_output(raw_stderr)
-    if timed_out and not stderr_str:
-        stderr_str = f"Python execution timed out after {timeout} seconds."
-    return {
-        "stdout": _decode_output(raw_stdout),
-        "stderr": stderr_str,
-        "return_code": return_code,
-        "timed_out": timed_out,
-        "execution_time_seconds": exec_time,
-        "sandboxed": True,
-        "sandbox_backend": "windows_job_object",
-        "sandbox_metrics": metrics,
-    }
 
 
 def list_processes(
@@ -278,30 +230,50 @@ def list_processes(
         List of process information objects.
     """
     limit = max(1, min(limit, 500))
-    procs = []
-    for p in psutil.process_iter(["pid", "name", "cpu_percent", "memory_info", "status", "username"]):
-        try:
-            info = p.info
-            name = info.get("name") or ""
-            if filter_name and filter_name.lower() not in name.lower():
+    filter_lower = filter_name.lower() if filter_name else None
+    procs: List[Dict[str, Any]] = []
+
+    if filter_lower:
+        # Pre-filter on pid/name before querying expensive Win32 token/memory attributes
+        for p in psutil.process_iter(["pid", "name"]):
+            try:
+                name = p.info.get("name") or ""
+                if filter_lower not in name.lower():
+                    continue
+                with p.oneshot():
+                    mem_info = p.memory_info()
+                    try:
+                        username = p.username()
+                    except (psutil.AccessDenied, psutil.NoSuchProcess):
+                        username = None
+                    procs.append({
+                        "pid": p.pid,
+                        "name": name,
+                        "cpu_percent": p.cpu_percent() or 0.0,
+                        "memory_mb": round(mem_info.rss / (1024 * 1024), 1) if mem_info else 0.0,
+                        "status": p.status(),
+                        "username": username,
+                    })
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                 continue
-            mem_mb = round(info["memory_info"].rss / (1024 * 1024), 1) if info.get("memory_info") else 0.0
-            procs.append({
-                "pid": info.get("pid"),
-                "name": name,
-                "cpu_percent": info.get("cpu_percent") or 0.0,
-                "memory_mb": mem_mb,
-                "status": info.get("status"),
-                "username": info.get("username"),
-            })
-        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-            continue
-
-    if sort_by.lower() == "memory":
-        procs.sort(key=lambda x: x["memory_mb"], reverse=True)
     else:
-        procs.sort(key=lambda x: x["cpu_percent"], reverse=True)
+        for p in psutil.process_iter(["pid", "name", "cpu_percent", "memory_info", "status", "username"]):
+            try:
+                info = p.info
+                mem_info = info.get("memory_info")
+                procs.append({
+                    "pid": info.get("pid"),
+                    "name": info.get("name") or "",
+                    "cpu_percent": info.get("cpu_percent") or 0.0,
+                    "memory_mb": round(mem_info.rss / (1024 * 1024), 1) if mem_info else 0.0,
+                    "status": info.get("status"),
+                    "username": info.get("username"),
+                })
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                continue
 
+    sort_key = "memory_mb" if sort_by.lower() == "memory" else "cpu_percent"
+    procs.sort(key=lambda x: x[sort_key], reverse=True)
     return procs[:limit]
 
 
@@ -437,6 +409,9 @@ def get_security_status() -> Dict[str, Any]:
         "protected_system_roots": len(security.CRITICAL_PATHS) + len(security.SYSTEM_DRIVES),
         "dangerous_patterns_blocked": len(security.DANGEROUS_COMMAND_PATTERNS),
         "protected_system_processes": len(security.PROTECTED_PROCESS_NAMES),
+        "host_os_write_protected": True,
+        "host_os_read_only": True,
+        "host_os_roots": security.HOST_OS_ROOTS,
         "sandbox_backend": "windows_job_object",
         "sandbox_supported": is_job_sandbox_supported(),
         "sandbox_mandatory": True,

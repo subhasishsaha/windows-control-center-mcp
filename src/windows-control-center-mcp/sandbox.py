@@ -23,7 +23,7 @@ except ImportError:
     HAS_WIN32JOB = False
 
 
-@dataclass
+@dataclass(slots=True, frozen=True)
 class JobSandboxConfig:
     """Configuration options and resource quotas for Windows Job Object sandbox."""
     max_memory_mb: int = 512              # Per-process memory limit
@@ -223,50 +223,49 @@ def run_in_job_sandbox(
         Tuple of (stdout_bytes, stderr_bytes, return_code, timed_out, metrics).
     """
     cfg = config or JobSandboxConfig()
-    sandbox = WindowsJobSandbox(cfg)
-    sandbox.create_job()
-
     timed_out = False
     proc = None
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            cwd=cwd,
-        )
-        # Immediately assign the process to the Job Object
-        assigned = sandbox.assign_process(proc)
-        if not assigned and proc.poll() is None:
-            try:
-                proc.kill()
-                proc.wait(timeout=2)
-            except Exception:
-                pass
-            raise RuntimeError("Failed to assign child process to Windows Job Object sandbox.")
-
+    with WindowsJobSandbox(cfg) as sandbox:
         try:
-            raw_stdout, raw_stderr = proc.communicate(timeout=timeout)
-            returncode = proc.returncode
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            # Atomically terminate the entire process hierarchy in kernel
-            sandbox.terminate(exit_code=win32con.STATUS_TIMEOUT if HAS_WIN32JOB else -1)
-            try:
-                proc.kill()
-            except Exception:
-                pass
-            raw_stdout, raw_stderr = proc.communicate()
-            returncode = -1
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                cwd=cwd,
+                creationflags=creationflags,
+            )
+            # Immediately assign the process to the Job Object
+            assigned = sandbox.assign_process(proc)
+            if not assigned and proc.poll() is None:
+                try:
+                    proc.kill()
+                    proc.wait(timeout=2)
+                except Exception:
+                    pass
+                raise RuntimeError("Failed to assign child process to Windows Job Object sandbox.")
 
-        metrics = sandbox.get_metrics()
-        return raw_stdout, raw_stderr, returncode, timed_out, metrics
-
-    finally:
-        if proc and proc.poll() is None:
             try:
-                proc.kill()
-            except Exception:
-                pass
-        sandbox.close()
+                raw_stdout, raw_stderr = proc.communicate(timeout=timeout)
+                returncode = proc.returncode
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                # Atomically terminate the entire process hierarchy in kernel
+                sandbox.terminate(exit_code=win32con.STATUS_TIMEOUT if HAS_WIN32JOB else -1)
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                raw_stdout, raw_stderr = proc.communicate()
+                returncode = -1
+
+            metrics = sandbox.get_metrics()
+            return raw_stdout, raw_stderr, returncode, timed_out, metrics
+
+        finally:
+            if proc and proc.poll() is None:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass

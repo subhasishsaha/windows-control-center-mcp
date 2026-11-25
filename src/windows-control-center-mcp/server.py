@@ -1,33 +1,27 @@
-"""Windows Control Center Local MCP Server.
+"""Windows Control Center Local MCP Server (Strictly Stdio Transport).
 
 Provides AGY CLI / Antigravity with full, authorized access to your Windows computer locally:
-- PowerShell & CMD command execution
-- Python script runner (inside virtual environment)
-- Process monitoring and management (CPU, RAM, termination)
+- PowerShell & CMD command execution (kernel-sandboxed)
+- Python script runner (inside virtual environment, kernel-sandboxed)
+- Process monitoring and management (CPU, RAM, safe termination)
 - File system read/write/search/delete/copy
 - System status (CPU, RAM, Disks, Battery, Uptime)
-- Network configuration and connectivity
+- Network configuration and connectivity inspection
 - Desktop automation (Application launcher, Clipboard, Notifications, Screenshots)
 
-STRICT LOCALHOST ONLY: Binds exclusively to 127.0.0.1 on the /mcp endpoint. No cloud exposure.
+STRICT HOST STDIO ONLY: Runs locally on the host machine using standard input/output (stdio).
+Zero network ports, zero HTTP endpoints, zero remote surface.
 """
 
 import argparse
-import ipaddress
+from importlib.metadata import PackageNotFoundError, version as _pkg_version
 import json
 import logging
-import os
-import re
-import secrets
 import sys
-from typing import Any, Dict, List, Optional
+from typing import Annotated, Any, Dict, List, Literal, Optional
 from fastmcp import FastMCP
-from starlette.applications import Starlette
-from starlette.middleware import Middleware
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import Response
-from starlette.routing import Route
-import uvicorn
+from mcp.types import ToolAnnotations
+from pydantic import Field
 
 # Import underlying tool implementations
 from tools.command_tools import (
@@ -69,9 +63,17 @@ logging.basicConfig(
     format="[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s",
 )
 
+def _get_server_version() -> str:
+    try:
+        return _pkg_version("windows-control-center-mcp")
+    except PackageNotFoundError:
+        return "1.0.0"
+
+
 # Initialize FastMCP Server
 mcp = FastMCP(
     name="Windows-Control-Center",
+    version=_get_server_version(),
     instructions=(
         "Windows Control Center MCP Server. This server allows the AI assistant to interact "
         "with the user's Windows PC: executing shell commands (PowerShell/CMD), running Python scripts, "
@@ -81,17 +83,60 @@ mcp = FastMCP(
     ),
 )
 
+_READ_ONLY_LOCAL = ToolAnnotations(
+    readOnlyHint=True,
+    destructiveHint=False,
+    idempotentHint=True,
+    openWorldHint=False,
+)
+_READ_ONLY_NETWORK = ToolAnnotations(
+    readOnlyHint=True,
+    destructiveHint=False,
+    idempotentHint=True,
+    openWorldHint=True,
+)
+_DESTRUCTIVE_EXEC = ToolAnnotations(
+    readOnlyHint=False,
+    destructiveHint=True,
+    idempotentHint=False,
+    openWorldHint=True,
+)
+_DESTRUCTIVE_LOCAL = ToolAnnotations(
+    readOnlyHint=False,
+    destructiveHint=True,
+    idempotentHint=False,
+    openWorldHint=False,
+)
+_WRITE_IDEMPOTENT_LOCAL = ToolAnnotations(
+    readOnlyHint=False,
+    destructiveHint=False,
+    idempotentHint=True,
+    openWorldHint=False,
+)
+_ACTION_LOCAL = ToolAnnotations(
+    readOnlyHint=False,
+    destructiveHint=False,
+    idempotentHint=False,
+    openWorldHint=False,
+)
+_ACTION_OPEN_WORLD = ToolAnnotations(
+    readOnlyHint=False,
+    destructiveHint=False,
+    idempotentHint=False,
+    openWorldHint=True,
+)
+
 
 # ==========================================
 # Category 1: Command & Process Execution
 # ==========================================
 
 
-@mcp.tool()
+@mcp.tool(annotations=_DESTRUCTIVE_EXEC, tags={"command", "shell", "execution"})
 def execute_powershell(
-    command: str,
+    command: Annotated[str, Field(min_length=1, description="The PowerShell command, cmdlet, or script block to run.")],
     working_dir: Optional[str] = None,
-    timeout: int = 120,
+    timeout: Annotated[int, Field(ge=1, le=3600, description="Maximum execution time in seconds before terminating.")] = 120,
     elevate: bool = False,
 ) -> Dict[str, Any]:
     """Execute a PowerShell command or script on the Windows computer.
@@ -112,10 +157,10 @@ def execute_powershell(
     return _execute_powershell(command=command, working_dir=working_dir, timeout=timeout, elevate=elevate)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_DESTRUCTIVE_EXEC, tags={"command", "elevated", "execution"})
 def execute_elevated_command(
-    command: str,
-    timeout: int = 120,
+    command: Annotated[str, Field(min_length=1, description="PowerShell command or script to execute with elevation.")],
+    timeout: Annotated[int, Field(ge=1, le=3600, description="Maximum execution time in seconds.")] = 120,
     working_dir: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Execute a command with Administrator / Elevated privileges via Windows UAC.
@@ -134,7 +179,7 @@ def execute_elevated_command(
     return _execute_elevated_command(command=command, timeout=timeout, working_dir=working_dir)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY_LOCAL, tags={"security", "read-only"})
 def get_security_status() -> Dict[str, Any]:
     """Inspect active security guardrails, administrative status, and safeguards.
 
@@ -144,11 +189,11 @@ def get_security_status() -> Dict[str, Any]:
     return _get_security_status()
 
 
-@mcp.tool()
+@mcp.tool(annotations=_DESTRUCTIVE_EXEC, tags={"command", "shell", "execution"})
 def execute_cmd(
-    command: str,
+    command: Annotated[str, Field(min_length=1, description="The cmd.exe command to run.")],
     working_dir: Optional[str] = None,
-    timeout: int = 120,
+    timeout: Annotated[int, Field(ge=1, le=3600, description="Maximum execution time in seconds.")] = 120,
 ) -> Dict[str, Any]:
     """Execute a Command Prompt (cmd.exe) command or batch line on Windows.
 
@@ -166,10 +211,10 @@ def execute_cmd(
     return _execute_cmd(command=command, working_dir=working_dir, timeout=timeout)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_DESTRUCTIVE_EXEC, tags={"command", "python", "execution"})
 def execute_python(
-    code: str,
-    timeout: int = 60,
+    code: Annotated[str, Field(min_length=1, description="Python source code snippet to execute.")],
+    timeout: Annotated[int, Field(ge=1, le=3600, description="Maximum seconds to wait before terminating.")] = 60,
 ) -> Dict[str, Any]:
     """Execute Python code snippet directly inside this server's virtual environment.
 
@@ -186,11 +231,11 @@ def execute_python(
     return _execute_python(code=code, timeout=timeout)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY_LOCAL, tags={"process", "monitoring", "read-only"})
 def list_processes(
     filter_name: Optional[str] = None,
-    sort_by: str = "cpu",
-    limit: int = 25,
+    sort_by: Literal["cpu", "memory"] = "cpu",
+    limit: Annotated[int, Field(ge=1, le=500, description="Maximum number of processes to return.")] = 25,
 ) -> List[Dict[str, Any]]:
     """List running processes on the system with PID, CPU %, memory usage, and user info.
 
@@ -205,9 +250,9 @@ def list_processes(
     return _list_processes(filter_name=filter_name, sort_by=sort_by, limit=limit)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_DESTRUCTIVE_LOCAL, tags={"process", "destructive"})
 def kill_process(
-    pid: Optional[int] = None,
+    pid: Annotated[Optional[int], Field(ge=0, description="Numeric Process ID to terminate.")] = None,
     name: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Terminate a running process by Process ID (PID) or process executable name.
@@ -230,11 +275,11 @@ def kill_process(
 # ==========================================
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY_LOCAL, tags={"filesystem", "read-only"})
 def read_file(
-    path: str,
-    start_line: int = 1,
-    max_lines: int = 500,
+    path: Annotated[str, Field(min_length=1, description="Path to the target file (relative or absolute).")],
+    start_line: Annotated[int, Field(ge=1, description="1-indexed line number to start reading from.")] = 1,
+    max_lines: Annotated[int, Field(ge=1, le=5000, description="Maximum number of lines to return.")] = 500,
     encoding: str = "utf-8",
 ) -> Dict[str, Any]:
     """Read contents of a file on the local machine with line-range pagination.
@@ -251,11 +296,11 @@ def read_file(
     return _read_file(path=path, start_line=start_line, max_lines=max_lines, encoding=encoding)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_DESTRUCTIVE_LOCAL, tags={"filesystem", "write"})
 def write_file(
-    path: str,
+    path: Annotated[str, Field(min_length=1, description="Path where the file should be written.")],
     content: str,
-    mode: str = "w",
+    mode: Literal["w", "a"] = "w",
     encoding: str = "utf-8",
 ) -> Dict[str, Any]:
     """Write or append text content to a file. Automatically creates parent directories.
@@ -273,12 +318,12 @@ def write_file(
     return _write_file(path=path, content=content, mode=mode, encoding=encoding)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY_LOCAL, tags={"filesystem", "read-only"})
 def list_directory(
     path: str = ".",
     recursive: bool = False,
-    max_depth: int = 2,
-    max_items: int = 100,
+    max_depth: Annotated[int, Field(ge=1, le=20, description="Maximum recursion depth when recursive=True.")] = 2,
+    max_items: Annotated[int, Field(ge=1, le=1000, description="Maximum items to return.")] = 100,
 ) -> Dict[str, Any]:
     """List files and folders in a directory with file sizes and modification timestamps.
 
@@ -294,11 +339,11 @@ def list_directory(
     return _list_directory(path=path, recursive=recursive, max_depth=max_depth, max_items=max_items)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY_LOCAL, tags={"filesystem", "search", "read-only"})
 def search_files(
-    pattern: str,
+    pattern: Annotated[str, Field(min_length=1, description="Wildcard search pattern (e.g., '*.docx', 'config*.json').")],
     root_path: str = ".",
-    max_results: int = 50,
+    max_results: Annotated[int, Field(ge=1, le=500, description="Maximum results to return.")] = 50,
 ) -> Dict[str, Any]:
     """Search for files and directories matching a wildcard pattern (e.g. '*.py', 'report*.*').
 
@@ -313,8 +358,10 @@ def search_files(
     return _search_files(pattern=pattern, root_path=root_path, max_results=max_results)
 
 
-@mcp.tool()
-def get_file_info(path: str) -> Dict[str, Any]:
+@mcp.tool(annotations=_READ_ONLY_LOCAL, tags={"filesystem", "read-only"})
+def get_file_info(
+    path: Annotated[str, Field(min_length=1, description="Path to inspect.")],
+) -> Dict[str, Any]:
     """Get detailed metadata for a file or directory (size, timestamps, permissions, extension).
 
     Args:
@@ -326,8 +373,11 @@ def get_file_info(path: str) -> Dict[str, Any]:
     return _get_file_info(path=path)
 
 
-@mcp.tool()
-def delete_file_or_dir(path: str, recursive: bool = False) -> Dict[str, Any]:
+@mcp.tool(annotations=_DESTRUCTIVE_LOCAL, tags={"filesystem", "destructive"})
+def delete_file_or_dir(
+    path: Annotated[str, Field(min_length=1, description="Path of the file or directory to delete.")],
+    recursive: bool = False,
+) -> Dict[str, Any]:
     """Delete a file or directory on the computer safely.
 
     Protected against accidental or malicious deletion of system directories or drive roots.
@@ -343,11 +393,11 @@ def delete_file_or_dir(path: str, recursive: bool = False) -> Dict[str, Any]:
     return _delete_file_or_dir(path=path, recursive=recursive)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_DESTRUCTIVE_LOCAL, tags={"filesystem", "write"})
 def copy_or_move(
-    source: str,
-    destination: str,
-    action: str = "copy",
+    source: Annotated[str, Field(min_length=1, description="Source file or folder path.")],
+    destination: Annotated[str, Field(min_length=1, description="Destination file or folder path.")],
+    action: Literal["copy", "move"] = "copy",
 ) -> Dict[str, Any]:
     """Copy or move a file or directory from source to destination.
 
@@ -370,7 +420,7 @@ def copy_or_move(
 # ==========================================
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY_LOCAL, tags={"system", "monitoring", "read-only"})
 def get_system_info() -> Dict[str, Any]:
     """Get full system health: OS version, CPU cores & usage, RAM usage, all disk drives, and battery.
 
@@ -380,7 +430,7 @@ def get_system_info() -> Dict[str, Any]:
     return _get_system_info()
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY_NETWORK, tags={"system", "network", "read-only"})
 def get_network_info() -> Dict[str, Any]:
     """Get network adapters, local IPv4 addresses, and check active internet connectivity.
 
@@ -390,7 +440,7 @@ def get_network_info() -> Dict[str, Any]:
     return _get_network_info()
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY_LOCAL, tags={"system", "read-only"})
 def get_environment(var_name: Optional[str] = None) -> Dict[str, Any]:
     """Get a specific environment variable or view common system environment variables.
 
@@ -410,9 +460,9 @@ def get_environment(var_name: Optional[str] = None) -> Dict[str, Any]:
 # ==========================================
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ACTION_OPEN_WORLD, tags={"desktop", "automation"})
 def launch_app(
-    target: str,
+    target: Annotated[str, Field(min_length=1, description="Application executable/shortcut name, document path, or website URL.")],
     args: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Launch an application (e.g. notepad, calc, code), open a file, or open a website URL.
@@ -430,7 +480,7 @@ def launch_app(
     return _launch_app(target=target, args=args)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY_LOCAL, tags={"desktop", "clipboard", "read-only"})
 def get_clipboard() -> Dict[str, Any]:
     """Read the current text content from the Windows clipboard.
 
@@ -440,7 +490,7 @@ def get_clipboard() -> Dict[str, Any]:
     return _get_clipboard()
 
 
-@mcp.tool()
+@mcp.tool(annotations=_WRITE_IDEMPOTENT_LOCAL, tags={"desktop", "clipboard"})
 def set_clipboard(text: str) -> Dict[str, Any]:
     """Copy text to the Windows clipboard so the user or an app can paste it.
 
@@ -453,7 +503,7 @@ def set_clipboard(text: str) -> Dict[str, Any]:
     return _set_clipboard(text=text)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ACTION_LOCAL, tags={"desktop", "screenshot"})
 def take_screenshot(save_path: Optional[str] = None) -> Dict[str, Any]:
     """Take a screenshot of the primary Windows display and save it as a PNG file.
 
@@ -467,8 +517,11 @@ def take_screenshot(save_path: Optional[str] = None) -> Dict[str, Any]:
     return _take_screenshot(save_path=save_path)
 
 
-@mcp.tool()
-def show_notification(title: str, message: str) -> Dict[str, Any]:
+@mcp.tool(annotations=_ACTION_LOCAL, tags={"desktop", "notification"})
+def show_notification(
+    title: Annotated[str, Field(min_length=1, description="Notification header text.")],
+    message: Annotated[str, Field(min_length=1, description="Notification message text.")],
+) -> Dict[str, Any]:
     """Display a Windows toast or balloon notification on the user's desktop screen.
 
     Args:
@@ -487,21 +540,21 @@ def show_notification(title: str, message: str) -> Dict[str, Any]:
 # ==========================================
 
 
-@mcp.resource("system://specs")
+@mcp.resource("system://specs", mime_type="application/json", tags={"system", "read-only"})
 def system_specs_resource() -> str:
     """Read-only resource presenting system hardware, OS, and disk summary."""
     info = _get_system_info()
     return json.dumps(info, indent=2)
 
 
-@mcp.resource("system://network")
+@mcp.resource("system://network", mime_type="application/json", tags={"system", "network", "read-only"})
 def system_network_resource() -> str:
     """Read-only resource presenting active network interfaces and connectivity."""
     info = _get_network_info()
     return json.dumps(info, indent=2)
 
 
-@mcp.prompt("system_health_check")
+@mcp.prompt("system_health_check", tags={"system", "diagnostics"})
 def system_health_check_prompt() -> str:
     """Prompt template to inspect Windows laptop performance, disk space, and running tasks."""
     return (
@@ -514,283 +567,40 @@ def system_health_check_prompt() -> str:
 
 
 # ==========================================
-# Main Entry Point & Host Defense
+# Main Entry Point (Strictly Local Stdio)
 # ==========================================
-
-ALLOWED_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "testserver"}
-
-
-def _parse_host_header(host: str) -> Optional[str]:
-    """Extract and validate the host component from a Host header or address string.
-
-    Returns the bare host (e.g., '127.0.0.1', 'localhost', '::1') if valid,
-    or None if the host string is malformed or contains an invalid port.
-    """
-    if not host:
-        return None
-    clean = host.strip().lower()
-    if not clean:
-        return None
-
-    # Handle IPv6 bracket format: [::1] or [::1]:8000
-    if clean.startswith("["):
-        bracket_end = clean.find("]")
-        if bracket_end == -1:
-            return None  # Unclosed bracket
-        host_part = clean[1:bracket_end]
-        remainder = clean[bracket_end + 1:]
-        if remainder:
-            if not remainder.startswith(":"):
-                return None  # Malformed suffix: e.g. [::1].evil.com
-            port_str = remainder[1:]
-            if not (port_str.isdigit() and 1 <= int(port_str) <= 65535):
-                return None  # Malformed port: e.g. [::1]:8000.evil.com or [::1]:abc
-        return host_part
-
-    # IPv4 or hostname with optional port: host or host:port
-    if ":" in clean:
-        parts = clean.split(":")
-        if len(parts) == 2:
-            host_part, port_str = parts
-            if not (port_str.isdigit() and 1 <= int(port_str) <= 65535):
-                return None  # Malformed port: e.g. 127.0.0.1:8000.evil.com
-            return host_part
-        else:
-            # Multiple colons without brackets - check if valid raw IPv6 address (e.g. ::1)
-            try:
-                ip = ipaddress.ip_address(clean)
-                if ip.version == 6:
-                    return clean
-            except ValueError:
-                pass
-            return None
-
-    return clean
-
-
-def _is_loopback(host: str) -> bool:
-    """Check if the provided host address is strictly a loopback address or loopback hostname.
-
-    Supports IPv4 127.0.0.0/8, IPv6 ::1, 'localhost', and Starlette 'testserver'.
-    Rejects any public or external domains starting with '127.' (e.g. 127.evil.com).
-    """
-    clean_host = _parse_host_header(host)
-    if not clean_host:
-        return False
-
-    if clean_host in ALLOWED_LOOPBACK_HOSTS:
-        return True
-    try:
-        return ipaddress.ip_address(clean_host).is_loopback
-    except ValueError:
-        return False
-
-
-def _is_safe_origin(origin: str) -> bool:
-    """Validate that the Origin header comes from a trusted local context.
-
-    Rejects arbitrary public website origins to prevent Cross-Origin Browser /
-    DNS-Rebinding attacks against the local MCP server.
-    """
-    if not origin:
-        return True
-    origin_lower = origin.strip().lower()
-    if origin_lower == "null":
-        return False  # Disallow "null" origin to prevent sandboxed iframe bypass
-    # Allow http or https on localhost, 127.0.0.1, or [::1], with or without explicit port
-    if re.match(r"^https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?$", origin_lower):
-        return True
-    if origin_lower.startswith(("vscode-", "cursor-", "vscode-webview://")):
-        return True
-    return False
-
-
-def _is_safe_host(host_header: str, allowed_host: str = "127.0.0.1", allow_remote: bool = False) -> bool:
-    """Validate that the Host header is a safe loopback host or allowed interface.
-
-    Prevents DNS rebinding attacks where an external domain resolves to 127.0.0.1.
-    """
-    if not host_header:
-        return True
-    clean_host = _parse_host_header(host_header)
-    if not clean_host:
-        return False
-
-    if _is_loopback(clean_host):
-        return True
-    if allow_remote:
-        return True
-
-    clean_allowed = _parse_host_header(allowed_host)
-    if not clean_allowed:
-        clean_allowed = allowed_host.strip().lower()
-
-    return clean_host == clean_allowed
-
-
-class LocalCorsMiddleware(BaseHTTPMiddleware):
-    """Enforce CORS, DNS rebinding protection, and optional Bearer token authentication."""
-
-    def __init__(self, app, allowed_host: str = "127.0.0.1", allow_remote_access: bool = False):
-        super().__init__(app)
-        self.allowed_host = allowed_host
-        self.allow_remote_access = allow_remote_access
-
-    async def dispatch(self, request, call_next):
-        host = request.headers.get("host", "")
-        if host and not _is_safe_host(host, self.allowed_host, self.allow_remote_access):
-            logger.warning("BLOCKED untrusted Host header: %s", host)
-            return Response(
-                status_code=403,
-                content="Host header validation failed (DNS rebinding protection).",
-            )
-
-        origin = request.headers.get("origin", "")
-        if origin and not _is_safe_origin(origin):
-            logger.warning("BLOCKED untrusted cross-origin request from: %s", origin)
-            return Response(
-                status_code=403,
-                content="Cross-Origin requests from external domains are prohibited.",
-            )
-
-        allow_origin = origin if origin else "*"
-
-        if request.method == "OPTIONS":
-            return Response(
-                status_code=200,
-                headers={
-                    "Access-Control-Allow-Origin": allow_origin,
-                    "Access-Control-Allow-Methods": "GET, POST, HEAD, OPTIONS",
-                    "Access-Control-Allow-Headers": "*",
-                },
-            )
-
-        # Optional Bearer Token Authentication via MCP_AUTH_TOKEN
-        auth_token = os.environ.get("MCP_AUTH_TOKEN")
-        if auth_token:
-            auth_header = request.headers.get("authorization", "").strip()
-            # RFC 7235: auth scheme names are case-insensitive ('Bearer' or 'bearer')
-            scheme, _, token = auth_header.partition(" ")
-            if scheme.lower() != "bearer" or not secrets.compare_digest(token.strip(), auth_token):
-                logger.warning("UNAUTHORIZED request: missing or invalid Bearer token.")
-                return Response(
-                    status_code=401,
-                    content="Unauthorized: Missing or invalid Bearer token.",
-                    headers={"WWW-Authenticate": "Bearer"},
-                )
-
-        if request.method == "HEAD":
-            return Response(
-                status_code=200,
-                headers={
-                    "Content-Type": "application/json",
-                    "Access-Control-Allow-Origin": allow_origin,
-                    "Access-Control-Allow-Methods": "GET, POST, HEAD, OPTIONS",
-                    "Access-Control-Allow-Headers": "*",
-                },
-            )
-
-        response = await call_next(request)
-        response.headers["Access-Control-Allow-Origin"] = allow_origin
-        response.headers["Access-Control-Allow-Methods"] = "GET, POST, HEAD, OPTIONS"
-        response.headers["Access-Control-Allow-Headers"] = "*"
-        return response
 
 
 def parse_arguments() -> argparse.Namespace:
+    """Parse command line arguments for the stdio MCP server."""
     parser = argparse.ArgumentParser(
-        description="Windows Control Center Local MCP Server for AGY CLI / Antigravity"
+        description="Windows Control Center Local MCP Server (Strictly Host Stdio Transport)"
     )
     parser.add_argument(
         "--transport",
-        choices=["http", "stdio"],
-        default="http",
-        help="MCP transport protocol (default: http). Use 'stdio' for direct sub-process spawning.",
-    )
-    parser.add_argument(
-        "--host",
-        default="127.0.0.1",
-        help="Local loopback host IP (default: 127.0.0.1 - strictly localhost only)",
-    )
-    parser.add_argument(
-        "--port",
-        type=int,
-        default=8000,
-        help="Local port number (default: 8000)",
+        choices=["stdio"],
+        default="stdio",
+        help="MCP transport protocol (strictly 'stdio' for host machine execution).",
     )
     parser.add_argument(
         "--log-level",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         default="INFO",
-        help="Logging verbosity (default: INFO)",
-    )
-    parser.add_argument(
-        "--allow-remote-access",
-        action="store_true",
-        default=False,
-        help="Explicitly permit binding to external network interfaces (INSECURE: allows LAN devices to execute local tools).",
+        help="Logging verbosity (default: INFO, routed strictly to sys.stderr).",
     )
     return parser.parse_args()
 
 
 def main() -> None:
+    """Run the Windows Control Center MCP server over host stdio."""
     args = parse_arguments()
     logger.setLevel(getattr(logging, args.log_level))
 
-    # Guardrail: Enforce loopback binding unless explicitly overridden
-    if not _is_loopback(args.host) and not args.allow_remote_access:
-        logger.error(
-            "SECURITY REFUSAL: Refusing to bind to non-localhost address '%s'. "
-            "MCP provides local OS execution and must remain loopback-only. "
-            "If you intentionally require remote LAN access, pass '--allow-remote-access'.",
-            args.host,
-        )
-        sys.exit(1)
+    logger.info("Starting Windows Control Center MCP Server (Host Stdio Transport)...")
 
-    logger.info("Starting Windows-Control-Center Local MCP Server...")
-    logger.info("Transport: %s", args.transport)
-
-    if args.transport == "http":
-        logger.info("Configuring Streamable HTTP local endpoint at /mcp...")
-
-        base_app = mcp.http_app(
-            transport="http",
-            path="/mcp",
-            host_origin_protection=False,
-            allowed_hosts=["127.0.0.1", "localhost"],
-            allowed_origins=["*"],
-        )
-        asgi_app = base_app.routes[0].endpoint
-
-        # Strictly /mcp endpoint only (no cloud/sse routes)
-        local_app = Starlette(
-            routes=[
-                Route("/mcp", asgi_app),
-            ],
-            middleware=[
-                Middleware(
-                    LocalCorsMiddleware,
-                    allowed_host=args.host,
-                    allow_remote_access=args.allow_remote_access,
-                )
-            ],
-            lifespan=base_app.lifespan,
-        )
-
-        logger.info(
-            "Listening strictly on http://%s:%d/mcp (Local loopback only)",
-            args.host,
-            args.port,
-        )
-        uvicorn.run(
-            local_app,
-            host=args.host,
-            port=args.port,
-            log_level=args.log_level.lower(),
-        )
-    else:
-        # stdio transport (local subprocess spawned by AGY CLI / clients)
-        mcp.run(transport="stdio")
+    # FastMCP stdio transport: communicates strictly via stdin/stdout with client sub-process.
+    # sys.stderr is reserved for logging to prevent corrupting JSON-RPC protocol frames.
+    mcp.run(transport="stdio", show_banner=False)
 
 
 if __name__ == "__main__":

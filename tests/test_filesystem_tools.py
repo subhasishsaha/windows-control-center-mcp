@@ -201,6 +201,67 @@ class TestFilesystemTools(unittest.TestCase):
         self.assertEqual(search_res["count"], 1)
         self.assertEqual(search_res["results"][0]["name"], "report_2026.docx")
 
+    def test_read_file_cp1252_fallback(self):
+        """Test that read_file falls back cleanly to cp1252 when strict UTF-8 fails."""
+        cp1252_file = os.path.join(self.test_dir, "cp1252_sample.txt")
+        sample_text = "Café — smart quotes “hello”"
+        with open(cp1252_file, "wb") as f:
+            f.write(sample_text.encode("cp1252"))
+
+        res = read_file(cp1252_file)
+        self.assertNotIn("error", res)
+        self.assertEqual(res["content"], sample_text)
+
+    def test_host_os_folder_write_blocked_and_read_permitted(self):
+        """Test hardcoded host OS write rejection and read-only permission across filesystem tools."""
+        host_targets = [
+            r"C:\Windows\malware.dll",
+            r"C:\Windows\System32\evil.txt",
+            r"C:\WINDOW~1\bad.exe",
+            r"\\?\C:\Windows\hack.bat",
+            r"\\localhost\c$\Windows\payload.ps1",
+        ]
+        # 1. write_file must be blocked
+        for target in host_targets:
+            res_w = write_file(target, "malicious payload")
+            self.assertFalse(res_w["success"])
+            self.assertTrue(res_w.get("blocked_by_guardrail"))
+            self.assertIn("SECURITY POLICY VIOLATION", res_w["error"])
+            self.assertIn("strictly read-only", res_w["error"])
+
+        # 2. delete_file_or_dir on host OS paths must be blocked
+        res_del = delete_file_or_dir(r"C:\Windows\System32\drivers\etc\hosts")
+        self.assertFalse(res_del["success"])
+        self.assertTrue(res_del.get("blocked_by_guardrail"))
+        self.assertIn("strictly read-only", res_del["error"])
+
+        # 3. copy_or_move with destination in host OS must be blocked
+        safe_src = os.path.join(self.test_dir, "safe.txt")
+        write_file(safe_src, "some data")
+        res_copy_in = copy_or_move(safe_src, r"C:\Windows\safe.txt", action="copy")
+        self.assertFalse(res_copy_in["success"])
+        self.assertTrue(res_copy_in.get("blocked_by_guardrail"))
+        self.assertIn("strictly read-only", res_copy_in["error"])
+
+        # 4. copy_or_move moving file out of host OS must be blocked (move deletes source)
+        res_move_out = copy_or_move(r"C:\Windows\System32\cmd.exe", os.path.join(self.test_dir, "cmd.exe"), action="move")
+        self.assertFalse(res_move_out["success"])
+        self.assertTrue(res_move_out.get("blocked_by_guardrail"))
+
+        # 5. read_file on benign host OS file must be permitted
+        hosts_file = r"C:\Windows\System32\drivers\etc\hosts"
+        if os.path.exists(hosts_file):
+            res_read = read_file(hosts_file)
+            self.assertNotIn("error", res_read)
+            self.assertIn("content", res_read)
+            self.assertFalse(res_read.get("blocked_by_guardrail", False))
+
+        # 6. list_directory on C:\Windows must succeed (read-only)
+        list_res = list_directory(r"C:\Windows", max_items=10)
+        self.assertNotIn("error", list_res)
+        self.assertIn("items", list_res)
+        self.assertGreater(len(list_res["items"]), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

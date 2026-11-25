@@ -37,8 +37,6 @@ dependencies = [
     "pyperclip>=1.8.0",
     "pillow>=10.0.0",
     "pywin32>=306",
-    "uvicorn>=0.30.0",
-    "starlette>=0.35.0",
 ]
 
 [project.optional-dependencies]
@@ -46,11 +44,25 @@ dev = [
     "pytest>=8.0.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/subhasishsaha/windows-control-center-mcp"
+Repository = "https://github.com/subhasishsaha/windows-control-center-mcp"
+Issues = "https://github.com/subhasishsaha/windows-control-center-mcp/issues"
+Documentation = "https://github.com/subhasishsaha/windows-control-center-mcp#readme"
+
 [project.scripts]
-windows-mcp = "server:main"
+windows-control-center-mcp = "server:main"
+
+[tool.setuptools.package-dir]
+"" = "src/windows-control-center-mcp"
+
+[tool.setuptools]
+py-modules = ["server", "security", "sandbox"]
+packages = ["tools"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
+pythonpath = ["src/windows-control-center-mcp"]

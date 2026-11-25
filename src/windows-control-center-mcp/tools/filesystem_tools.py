@@ -6,8 +6,13 @@ import re
 import shutil
 import stat
 import time
-from typing import Any, Dict
-from security import validate_path_safety, validate_read_safety
+from typing import Any, Dict, List, Tuple
+from security import (
+    clean_path_input,
+    validate_path_safety,
+    validate_read_safety,
+    validate_script_content,
+)
 
 
 def _format_time(timestamp: float) -> str:
@@ -44,9 +49,7 @@ def read_file(
     Returns:
         Dictionary containing file content, total line count, and range details.
     """
-    clean_path = path.strip().strip("\"'") if path else ""
-    if re.match(r"^[a-zA-Z]:$", clean_path):
-        clean_path = clean_path + "\\"
+    clean_path = clean_path_input(path)
     abs_path = os.path.abspath(clean_path)
 
     # Guardrail: Prevent unauthorized exfiltration of credential stores and sensitive files
@@ -62,22 +65,33 @@ def read_file(
     max_lines = max(1, min(max_lines, 5000))
     start_line = max(1, start_line)
 
-    lines = []
+    lines: List[str] = []
     total_lines = 0
 
-    # Stream lines safely without loading multi-gigabyte files entirely into memory
-    read_success = False
+    # Try strict decoding across candidate encodings before falling back to replacement mode
+    attempts: List[Tuple[str, str]] = []
     for enc in (encoding, "utf-8", "cp1252", "latin-1"):
+        if enc and (enc, "strict") not in attempts:
+            attempts.append((enc, "strict"))
+    attempts.append((encoding or "utf-8", "replace"))
+
+    read_success = False
+    for enc, err_mode in attempts:
+        lines = []
+        total_lines = 0
         try:
-            with open(abs_path, "r", encoding=enc, errors="replace") as f:
+            with open(abs_path, "r", encoding=enc, errors=err_mode) as f:
+                end_exclusive = start_line + max_lines
                 for idx, line in enumerate(f, start=1):
                     total_lines += 1
-                    if start_line <= idx < start_line + max_lines:
+                    if start_line <= idx < end_exclusive:
                         lines.append(line)
             read_success = True
             break
-        except Exception:
+        except (UnicodeDecodeError, LookupError):
             continue
+        except OSError:
+            break
 
     if not read_success:
         return {"error": f"Unable to read file: {abs_path}", "path": abs_path}
@@ -114,15 +128,18 @@ def write_file(
     if mode not in ("w", "a"):
         return {"success": False, "error": f"Invalid mode '{mode}'. Use 'w' or 'a'."}
 
-    clean_path = path.strip().strip("\"'") if path else ""
-    if re.match(r"^[a-zA-Z]:$", clean_path):
-        clean_path = clean_path + "\\"
+    clean_path = clean_path_input(path)
     abs_path = os.path.abspath(clean_path)
 
     # Guardrail: Prevent overwriting critical system files
     is_safe, path_err = validate_path_safety(abs_path, operation="write")
     if not is_safe:
         return {"success": False, "error": path_err, "path": abs_path, "blocked_by_guardrail": True}
+
+    # Guardrail: Prevent writing dangerous script droppers targeting host OS or system integrity
+    is_content_safe, content_err = validate_script_content(content, filename_or_ext=abs_path)
+    if not is_content_safe:
+        return {"success": False, "error": content_err, "path": abs_path, "blocked_by_guardrail": True}
 
     parent_dir = os.path.dirname(abs_path)
     if parent_dir and not os.path.exists(parent_dir):
@@ -168,31 +185,38 @@ def list_directory(
         return {"error": f"Path is not a directory: {abs_path}", "items": []}
 
     max_items = max(1, min(max_items, 1000))
-    items = []
+    max_depth = max(1, min(max_depth, 20))
+    items: List[Dict[str, Any]] = []
 
-    def scan_dir(current_dir: str, depth: int):
-        nonlocal items
+    def scan_dir(current_dir: str, depth: int) -> None:
         if len(items) >= max_items:
             return
         try:
+            entries_with_type: List[Tuple[bool, os.DirEntry]] = []
             with os.scandir(current_dir) as entries:
-                for entry in sorted(entries, key=lambda e: (not e.is_dir(), e.name.lower())):
-                    if len(items) >= max_items:
-                        break
+                for entry in entries:
                     try:
-                        stat_res = entry.stat()
-                        is_dir = entry.is_dir()
-                        items.append({
-                            "name": entry.name,
-                            "path": entry.path,
-                            "is_dir": is_dir,
-                            "size_bytes": stat_res.st_size if not is_dir else 0,
-                            "modified": _format_time(stat_res.st_mtime),
-                        })
-                        if is_dir and recursive and depth < max_depth:
-                            scan_dir(entry.path, depth + 1)
-                    except (PermissionError, OSError):
+                        entries_with_type.append((entry.is_dir(), entry))
+                    except OSError:
                         continue
+            entries_with_type.sort(key=lambda pair: (not pair[0], pair[1].name.lower()))
+
+            for is_dir, entry in entries_with_type:
+                if len(items) >= max_items:
+                    break
+                try:
+                    stat_res = entry.stat()
+                    items.append({
+                        "name": entry.name,
+                        "path": entry.path,
+                        "is_dir": is_dir,
+                        "size_bytes": stat_res.st_size if not is_dir else 0,
+                        "modified": _format_time(stat_res.st_mtime),
+                    })
+                    if is_dir and recursive and depth < max_depth:
+                        scan_dir(entry.path, depth + 1)
+                except (PermissionError, OSError):
+                    continue
         except (PermissionError, OSError):
             pass
 
@@ -226,28 +250,31 @@ def search_files(
         return {"error": f"Root path does not exist: {abs_root}", "results": []}
 
     max_results = max(1, min(max_results, 500))
-    results = []
+    pattern_re = re.compile(fnmatch.translate(pattern), re.IGNORECASE)
+    results: List[Dict[str, Any]] = []
 
     for root, dirs, files in os.walk(abs_root):
         if len(results) >= max_results:
             break
-        for name in files + dirs:
-            if fnmatch.fnmatch(name.lower(), pattern.lower()):
-                full_path = os.path.join(root, name)
-                is_dir = os.path.isdir(full_path)
-                try:
-                    stat_res = os.stat(full_path)
-                    results.append({
-                        "name": name,
-                        "path": full_path,
-                        "is_dir": is_dir,
-                        "size_bytes": stat_res.st_size if not is_dir else 0,
-                        "modified": _format_time(stat_res.st_mtime),
-                    })
-                except OSError:
-                    results.append({"name": name, "path": full_path, "is_dir": is_dir})
-                if len(results) >= max_results:
-                    break
+        for names, is_dir in ((files, False), (dirs, True)):
+            for name in names:
+                if pattern_re.match(name):
+                    full_path = os.path.join(root, name)
+                    try:
+                        stat_res = os.stat(full_path)
+                        results.append({
+                            "name": name,
+                            "path": full_path,
+                            "is_dir": is_dir,
+                            "size_bytes": stat_res.st_size if not is_dir else 0,
+                            "modified": _format_time(stat_res.st_mtime),
+                        })
+                    except OSError:
+                        results.append({"name": name, "path": full_path, "is_dir": is_dir})
+                    if len(results) >= max_results:
+                        break
+            if len(results) >= max_results:
+                break
 
     return {
         "root_path": abs_root,
@@ -301,9 +328,7 @@ def delete_file_or_dir(path: str, recursive: bool = False) -> Dict[str, Any]:
     Returns:
         Dictionary with deletion status and path.
     """
-    clean_path = path.strip().strip("\"'") if path else ""
-    if re.match(r"^[a-zA-Z]:$", clean_path):
-        clean_path = clean_path + "\\"
+    clean_path = clean_path_input(path)
     abs_path = os.path.abspath(clean_path)
 
     # Guardrail: Prevent deleting critical system roots and OS directories
@@ -358,14 +383,8 @@ def copy_or_move(
     if clean_action not in ("copy", "move"):
         return {"success": False, "error": f"Invalid action: '{action}'. Use 'copy' or 'move'."}
 
-    clean_src = source.strip().strip("\"'") if source else ""
-    if re.match(r"^[a-zA-Z]:$", clean_src):
-        clean_src = clean_src + "\\"
-    clean_dst = destination.strip().strip("\"'") if destination else ""
-    if re.match(r"^[a-zA-Z]:$", clean_dst):
-        clean_dst = clean_dst + "\\"
-    src_abs = os.path.abspath(clean_src)
-    dst_abs = os.path.abspath(clean_dst)
+    src_abs = os.path.abspath(clean_path_input(source))
+    dst_abs = os.path.abspath(clean_path_input(destination))
 
     # Guardrail: Validate destination for write/overwrite
     is_safe_dst, dst_err = validate_path_safety(dst_abs, operation="write")

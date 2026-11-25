@@ -7,7 +7,7 @@ import socket
 import time
 from typing import Any, Dict, Optional
 import psutil
-from security import STRICT_MODE
+import security
 
 SENSITIVE_VAR_PATTERN = re.compile(
     r"(KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|AUTH|CERT|PRIVATE|SIGNING|PAT|CONNSTR|CONNECTIONSTRING|DATABASE_URL|DB_URI|REDIS_URL|MONGO_URI|API_KEY|ACCESS_KEY|CLIENT_SECRET)",
@@ -22,7 +22,7 @@ def get_system_info() -> Dict[str, Any]:
         Dictionary containing hardware and OS status metrics.
     """
     # CPU
-    cpu_usage = psutil.cpu_percent(interval=0.3)
+    cpu_usage = psutil.cpu_percent(interval=0.1)
     cpu_count_logical = psutil.cpu_count(logical=True)
     cpu_count_physical = psutil.cpu_count(logical=False)
 
@@ -116,10 +116,9 @@ def get_network_info() -> Dict[str, Any]:
     has_internet = False
     for test_target in (("8.8.8.8", 53), ("1.1.1.1", 53)):
         try:
-            sock = socket.create_connection(test_target, timeout=2)
-            sock.close()
-            has_internet = True
-            break
+            with socket.create_connection(test_target, timeout=2):
+                has_internet = True
+                break
         except OSError:
             continue
 
@@ -144,7 +143,7 @@ def get_environment(var_name: Optional[str] = None) -> Dict[str, Any]:
     """
     if var_name:
         val = os.environ.get(var_name)
-        if val is not None and STRICT_MODE and SENSITIVE_VAR_PATTERN.search(var_name):
+        if val is not None and security.STRICT_MODE and SENSITIVE_VAR_PATTERN.search(var_name):
             return {
                 "variable": var_name,
                 "value": "********",

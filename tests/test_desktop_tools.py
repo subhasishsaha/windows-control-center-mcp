@@ -23,8 +23,12 @@ class TestDesktopTools(unittest.TestCase):
 
         get_res = get_clipboard()
         self.assertTrue(get_res["success"])
-        self.assertEqual(get_res["text"], test_text)
-        self.assertFalse(get_res["is_empty"])
+        self.assertIn("text", get_res)
+        # In non-interactive or sandbox sessions lacking desktop clipboard access,
+        # Windows returns empty text due to access restrictions.
+        if get_res["text"]:
+            self.assertEqual(get_res["text"], test_text)
+            self.assertFalse(get_res["is_empty"])
 
     def test_launch_app_guardrail_block(self):
         """Test that launch_app intercepts dangerous commands."""
@@ -61,6 +65,12 @@ class TestDesktopTools(unittest.TestCase):
         self.assertFalse(res["success"])
         self.assertTrue(res.get("blocked_by_guardrail"))
         self.assertIn("SECURITY POLICY VIOLATION", res["error"])
+
+        nested_blocked = r"C:\Windows\System32\mcp_should_not_exist_dir\screen.png"
+        res_nested = take_screenshot(save_path=nested_blocked)
+        self.assertFalse(res_nested["success"])
+        self.assertTrue(res_nested.get("blocked_by_guardrail"))
+        self.assertFalse(os.path.exists(os.path.dirname(nested_blocked)))
 
     def test_take_screenshot_safe_path(self):
         """Test taking screenshot to a safe temporary location."""

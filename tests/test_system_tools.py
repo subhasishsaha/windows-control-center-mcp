@@ -73,6 +73,25 @@ class TestSystemTools(unittest.TestCase):
             finally:
                 del os.environ[var_name]
 
+    def test_get_environment_respects_dynamic_strict_mode(self):
+        """Ensure get_environment reads security.STRICT_MODE dynamically."""
+        import security
+        old_mode = security.STRICT_MODE
+        os.environ["TEST_MCP_DYNAMIC_TOKEN"] = "secret-val"
+        try:
+            security.STRICT_MODE = False
+            res_open = get_environment(var_name="TEST_MCP_DYNAMIC_TOKEN")
+            self.assertFalse(res_open["is_masked"])
+            self.assertEqual(res_open["value"], "secret-val")
+
+            security.STRICT_MODE = True
+            res_masked = get_environment(var_name="TEST_MCP_DYNAMIC_TOKEN")
+            self.assertTrue(res_masked["is_masked"])
+            self.assertEqual(res_masked["value"], "********")
+        finally:
+            security.STRICT_MODE = old_mode
+            del os.environ["TEST_MCP_DYNAMIC_TOKEN"]
+
 
 if __name__ == "__main__":
     unittest.main()

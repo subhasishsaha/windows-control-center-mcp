@@ -9,7 +9,7 @@ import webbrowser
 from typing import Any, Dict, Optional
 import pyperclip
 from PIL import ImageGrab
-from security import validate_launch_safety, validate_path_safety
+from security import clean_path_input, validate_launch_safety, validate_path_safety
 
 
 def launch_app(
@@ -38,8 +38,8 @@ def launch_app(
             "blocked_by_guardrail": True,
         }
 
-    # URL handling
-    if clean_target.startswith("http://") or clean_target.startswith("https://"):
+    # URL handling (case-insensitive to match validate_launch_safety)
+    if clean_target.lower().startswith(("http://", "https://")):
         try:
             webbrowser.open(clean_target)
             return {"success": True, "action": "opened_url", "target": clean_target}
@@ -117,16 +117,12 @@ def take_screenshot(save_path: Optional[str] = None) -> Dict[str, Any]:
     """
     if not save_path:
         screenshots_dir = os.path.abspath("screenshots")
-        os.makedirs(screenshots_dir, exist_ok=True)
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         target_path = os.path.join(screenshots_dir, f"screenshot_{timestamp}.png")
     else:
-        target_path = os.path.abspath(save_path)
-        parent = os.path.dirname(target_path)
-        if parent and not os.path.exists(parent):
-            os.makedirs(parent, exist_ok=True)
+        target_path = os.path.abspath(clean_path_input(save_path))
 
-    # Guardrail: Prevent saving screenshots into protected system directories
+    # Guardrail: Validate path safety BEFORE creating parent directories
     is_safe, sec_err = validate_path_safety(target_path, operation="write")
     if not is_safe:
         return {
@@ -136,15 +132,20 @@ def take_screenshot(save_path: Optional[str] = None) -> Dict[str, Any]:
             "blocked_by_guardrail": True,
         }
 
+    parent = os.path.dirname(target_path)
+    if parent and not os.path.exists(parent):
+        os.makedirs(parent, exist_ok=True)
+
     # Attempt 1: PIL ImageGrab
     try:
-        image = ImageGrab.grab()
-        image.save(target_path, "PNG")
+        with ImageGrab.grab() as image:
+            image.save(target_path, "PNG")
+            width, height = image.width, image.height
         return {
             "success": True,
             "path": target_path,
-            "width": image.width,
-            "height": image.height,
+            "width": width,
+            "height": height,
             "method": "PIL.ImageGrab",
         }
     except Exception as pil_err:
