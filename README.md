@@ -7,22 +7,22 @@
 [![Built with FastMCP](https://img.shields.io/badge/built%20with-FastMCP%20v4-brightgreen.svg)](https://github.com/jlowin/fastmcp)
 [![Tests: 100 Passing](https://img.shields.io/badge/tests-100%20passed-success.svg)](tests/)
 
-A secure, high-performance, strictly local **Model Context Protocol (MCP)** server that connects AI assistants (**Google Antigravity, Claude Desktop, Cursor, Cline, Roo Code**) to your local Windows environment via native standard input/output (**stdio**).
+A local **Model Context Protocol (MCP)** server that connects AI assistants (**Google Antigravity, Claude Desktop, Cursor, Cline, Roo Code**) to your local Windows environment via standard input/output (**stdio**).
 
-Built on **FastMCP**, it operates with **zero network exposure** (no HTTP/TCP ports) and wraps system automation in defense-in-depth security: a hardcoded, non-bypassable host OS write lock and kernel-level Win32 Job Object process sandboxing.
+Built with **FastMCP**, it runs locally as a child process without opening network ports, providing tools for command execution, filesystem operations, process inspection, system telemetry, and desktop interactions.
 
 ---
 
 ## ⚡ What Does This Project Do?
 
-Windows Control Center gives your AI agent authorized, monitored, and safe control over your Windows machine:
+Windows Control Center provides tools for interacting with Windows systems:
 
-- **Command & Script Execution**: Run PowerShell, CMD, and isolated Python scripts with AST inspection and kernel sandboxing (CPU caps, memory limits, and fork-bomb quotas).
-- **Filesystem Management**: Inspect, read (with pagination), write, search, move, and safely delete files and folders—with an unconditional write-block protecting Windows system directories.
-- **Process Inspection & Safety**: List active processes with CPU and RAM metrics, and terminate runaway processes while protecting core Windows kernel services from BSODs.
-- **Hardware & System Telemetry**: Stream real-time hardware status (CPU usage, RAM allocation, disk partition usage, battery health, uptime, and active network interfaces).
-- **Desktop & GUI Automation**: Launch applications safely (without shell string concatenation), inspect and set the system clipboard, trigger Windows toast notifications, and capture multi-monitor screenshots.
-- **Native Host Stdio IPC**: Spawned on demand as a child process by your AI client (Antigravity, Claude, Cursor, etc.), communicating strictly through standard I/O pipes and terminating cleanly when the session ends.
+- **Command & Script Execution**: Run PowerShell, CMD, and Python scripts with execution timeouts, memory commit limits, and process count quotas via Win32 Job Objects.
+- **Filesystem Management**: Inspect, read (with pagination), write, search, move, and delete files and directories, with path validation on system directories.
+- **Process Inspection & Management**: List active processes with CPU and RAM metrics, and terminate processes by PID with protection for core system processes (`csrss.exe`, `lsass.exe`, `services.exe`, etc.).
+- **Hardware & System Telemetry**: Retrieve system status (CPU usage, RAM allocation, disk partition usage, battery health, uptime, and active network interfaces).
+- **Desktop & GUI Automation**: Launch applications directly without shell string concatenation, read and write system clipboard text, trigger Windows toast notifications, and capture multi-monitor screenshots.
+- **Local Stdio IPC**: Spawned on demand as a child process by your AI client (Antigravity, Claude, Cursor, etc.), communicating via standard I/O pipes and terminating when the client session ends.
 
 ---
 
@@ -32,18 +32,18 @@ Windows Control Center gives your AI agent authorized, monitored, and safe contr
 windows-mcp/
 ├── .github/
 │   └── workflows/
-│       └── publish.yml             # Manual workflow: test, build wheel & publish to PyPI
+│       └── publish.yml             # Test across Windows 10/11, build wheel & publish to PyPI
 ├── src/
-│   └── windows-control-center-mcp/ # Tier 1: Core engine & server package
+│   └── windows-control-center-mcp/ # Core server package
 │       ├── server.py               # FastMCP stdio server entrypoint & schemas
-│       ├── security.py             # Security engine, AST analyzer & host OS write lock
-│       ├── sandbox.py              # Win32 Job Object kernel sandbox & process quotas
-│       └── tools/                  # Modular tool implementations
+│       ├── security.py             # Path validation, script scanning & command validation
+│       ├── sandbox.py              # Win32 Job Object process limits & resource quotas
+│       └── tools/                  # Tool implementations
 │           ├── command_tools.py    # PowerShell, CMD, Python & process execution
 │           ├── desktop_tools.py    # App launcher, clipboard, notifications & screenshots
 │           ├── filesystem_tools.py # Paginated file read, write, search, move & delete
 │           └── system_tools.py     # Hardware telemetry, network status & environment
-├── tests/                          # Tier 2: Automated test suite (100 unit & integration tests)
+├── tests/                          # Automated test suite (100 unit & integration tests)
 │   ├── test_command_tools.py
 │   ├── test_desktop_tools.py
 │   ├── test_filesystem_tools.py
@@ -53,10 +53,10 @@ windows-mcp/
 │   └── test_system_tools.py
 ├── pyproject.toml                  # PEP 621 package manifest, scripts & pytest options
 ├── requirements.txt                # Pinned runtime dependencies
-├── CONTRIBUTING.md                 # Contribution guidelines & security policy
-├── DOCUMENTATION.md                # In-depth technical architecture & security documentation
+├── CONTRIBUTING.md                 # Contribution guidelines
+├── DOCUMENTATION.md                # Technical architecture & subsystem documentation
 ├── LICENSE                         # MIT License
-└── README.md                       # Project documentation
+└── README.md                       # Project overview and client setup
 ```
 
 ---
@@ -75,7 +75,7 @@ powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | ie
 
 ### Client Configuration Files
 
-Add the server to your preferred AI client configuration using `uvx` (zero-install):
+Add the server to your preferred AI client configuration using `uvx`:
 
 #### 1. Google Antigravity / AGY CLI
 
@@ -181,35 +181,35 @@ File path: `%APPDATA%\Code\User\globalStorage\rooveterinaryinc.roo-cline\setting
 | Tool | Description | Safety Hints |
 |---|---|---|
 | `execute_powershell` | Execute PowerShell commands inside Win32 Job Object sandbox. | `destructive: true` |
-| `execute_cmd` | Execute legacy Command Prompt (CMD.EXE) commands in sandbox. | `destructive: true` |
-| `execute_python` | Run Python code with AST validation & kernel sandbox quotas. | `destructive: true` |
-| `execute_elevated_command` | Trigger UAC prompt (`RunAs`) for admin commands (if allowed). | `destructive: true` |
-| `list_processes` | Inspect all running processes with PID, CPU %, and memory usage. | `read_only: true` |
-| `kill_process` | Terminate a process by PID (blocks attempts on OS kernel processes). | `destructive: true` |
+| `execute_cmd` | Execute Command Prompt (CMD.EXE) commands in Win32 Job Object sandbox. | `destructive: true` |
+| `execute_python` | Run Python code with AST validation & Win32 Job Object limits. | `destructive: true` |
+| `execute_elevated_command` | Trigger UAC prompt (`RunAs`) for administrative commands (when enabled). | `destructive: true` |
+| `list_processes` | Inspect running processes with PID, CPU %, and memory usage. | `read_only: true` |
+| `kill_process` | Terminate a process by PID (blocks attempts on core system processes). | `destructive: true` |
 
 ### 2. Filesystem Operations
 | Tool | Description | Safety Hints |
 |---|---|---|
 | `read_file` | Read file contents with line offset and limit pagination. | `read_only: true` |
-| `write_file` | Create or overwrite files (blocked against host OS directories). | `destructive: false` |
+| `write_file` | Create or overwrite files (restricted on protected system directories). | `destructive: false` |
 | `list_directory` | Paginated listing of directories with file size and timestamps. | `read_only: true` |
 | `search_files` | Search for files by pattern, extension, and optional recursion depth. | `read_only: true` |
 | `get_file_info` | Get file metadata, size, timestamps, and attributes. | `read_only: true` |
-| `delete_file_or_dir` | Safely delete a file or directory (blocked on drive roots/OS paths). | `destructive: true` |
+| `delete_file_or_dir` | Delete a file or directory (restricted on drive roots and system directories). | `destructive: true` |
 | `copy_or_move` | Copy or move files/folders with destination overwrite checks. | `destructive: false` |
 
 ### 3. System Telemetry & Network
 | Tool | Description | Safety Hints |
 |---|---|---|
-| `get_system_info` | OS version, CPU usage, RAM allocations, disk space, and battery. | `read_only: true` |
+| `get_system_info` | OS version, CPU usage, RAM allocations, disk space, and battery status. | `read_only: true` |
 | `get_network_info` | Active network adapters, IP addresses, MACs, and gateway status. | `read_only: true` |
-| `get_environment` | Read environment variables (automatically redacts secrets and keys). | `read_only: true` |
+| `get_environment` | Read environment variables (redacts sensitive tokens matching key/secret patterns). | `read_only: true` |
 | `get_security_status`| Current server policy, admin status, and audit log path. | `read_only: true` |
 
 ### 4. Desktop Automation
 | Tool | Description | Safety Hints |
 |---|---|---|
-| `launch_app` | Launch desktop applications safely without shell concatenation. | `destructive: false` |
+| `launch_app` | Launch desktop applications directly without shell string concatenation. | `destructive: false` |
 | `get_clipboard` | Read text currently on the Windows system clipboard. | `read_only: true` |
 | `set_clipboard` | Place text onto the Windows system clipboard. | `destructive: false` |
 | `take_screenshot` | Capture multi-monitor screenshot and save to a local PNG. | `destructive: false` |
@@ -224,17 +224,29 @@ File path: `%APPDATA%\Code\User\globalStorage\rooveterinaryinc.roo-cline\setting
 
 ## 🧪 Testing
 
-Run the full automated test suite using `uv`:
+Run the automated test suite using `uv`:
 
 ```powershell
 uv run pytest -v
 ```
 
-All **100 automated unit and integration tests** verify tool registrations, security policies, AST inspection, sandbox isolation, and stdio cleanliness across both Windows 10 and Windows 11.
+The test suite contains **100 automated unit and integration tests** verifying tool registrations, security policies, AST inspection, sandbox isolation, and stdio cleanliness across both Windows 10 and Windows 11.
+
+---
+
+## ⚠️ Security Boundaries & Known Limitations
+
+Windows Control Center uses software guardrails (regex filtering, path normalization, and AST checks) alongside Win32 Job Object resource controls. Users should understand the following design boundaries:
+
+- **Not an OS Container or Hypervisor**: Subprocesses execute directly on the host under your Windows user account, not inside a virtual machine, AppContainer, or isolated filesystem sandbox.
+- **User-Space File Access**: Guardrails protect Windows system paths (`C:\Windows`, `System32`, `Program Files`, etc.). Any files, repositories, or documents that your logged-in user account has rights to read, modify, or delete remain accessible to tools if commanded.
+- **No Network Egress Filtering**: Win32 Job Objects do not provide network isolation. Executed commands and scripts can establish outbound network connections unless restricted by external firewalls.
+- **Static Analysis Limitations**: Pattern checks analyze static command text. Dynamic string concatenation, runtime variable interpolation, .NET reflection, or COM objects in PowerShell can bypass static regex inspection.
+- **Client Approvals Recommended**: When configuring your AI client, consider using confirmation prompts rather than broad `autoApprove` for mutating tools (`execute_powershell`, `execute_cmd`, `execute_python`, `delete_file_or_dir`).
 
 ---
 
 ## 📄 License & Contributing
 
 - **License**: Released under the [MIT License](LICENSE).
-- **Contributing**: Please review [CONTRIBUTING.md](CONTRIBUTING.md) for code conventions, security disclosure guidelines, and testing requirements.
+- **Contributing**: Please review [CONTRIBUTING.md](CONTRIBUTING.md) for code conventions and testing requirements.
