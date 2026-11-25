@@ -62,7 +62,7 @@ class TestServerConfiguration(unittest.TestCase):
 
     def test_mcp_metadata_and_tool_annotations(self):
         """Verify FastMCP server version, resource mime types, and tool annotations."""
-        self.assertEqual(mcp.version, "1.0.0")
+        self.assertEqual(mcp.version, "1.0.1")
 
         resources = asyncio.run(mcp.list_resources())
         for r in resources:

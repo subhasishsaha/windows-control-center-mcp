@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "windows-control-center-mcp"
-version = "1.0.0"
+version = "1.0.1"
 description = "A local Windows Control Center Model Context Protocol (MCP) server for Antigravity, Claude Desktop, Cursor, and AI agents."
 readme = "README.md"
 requires-python = ">=3.10"

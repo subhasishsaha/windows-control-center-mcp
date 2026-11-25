@@ -67,7 +67,7 @@ def _get_server_version() -> str:
     try:
         return _pkg_version("windows-control-center-mcp")
     except PackageNotFoundError:
-        return "1.0.0"
+        return "1.0.1"
 
 
 # Initialize FastMCP Server
