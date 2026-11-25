@@ -61,7 +61,7 @@ jobs:
         run: uv python install ${{ matrix.python-version }}
 
       - name: Run automated test suite (100 tests)
-        run: uv run --python ${{ matrix.python-version }} pytest -v
+        run: uv run --extra dev --python ${{ matrix.python-version }} pytest -v
 
   publish:
     name: Build & Publish to PyPI
